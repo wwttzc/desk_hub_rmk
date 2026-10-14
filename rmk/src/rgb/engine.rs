@@ -103,29 +103,50 @@ impl<const LED_COUNT: usize, F: FrameBuffer> crate::core_traits::Runnable for Rg
     /// wrap is handled the same way QMK handles it.
     async fn run(&mut self) -> ! {
         let mut keyboard = KeyboardEvent::subscriber();
+        // `u32::MAX` as a "never ticked" sentinel: `wrapping_add` keeps the
+        // first comparison true whatever the clock's epoch is, so the first pass
+        // always ticks.
+        let mut next_tick_ms = u32::MAX;
 
         loop {
-            // Whichever comes first: a key press to record, or the tick that
-            // keeps the animation moving. `select` is what lets one task own
-            // both; awaiting the subscriber alone would stall the animation on a
-            // board nobody is typing on.
+            // `tick` is ready almost immediately — the drivers resolve on the
+            // spot and `Syncing` is a time check, not an `await`. Selecting on it
+            // unconditionally would let it win every race, and a subscriber that
+            // is never polled never sees its message. So the tick is only
+            // offered to `select` once its interval has actually elapsed;
+            // between ticks this task waits on the keyboard alone.
+            let now = embassy_time::Instant::now().as_millis() as u32;
+            if now.wrapping_sub(next_tick_ms) < TICK_INTERVAL_MS as u32 {
+                let event = keyboard.next_event().await;
+                self.record_from_event(event);
+                continue;
+            }
+            next_tick_ms = now.wrapping_add(TICK_INTERVAL_MS as u32);
+
             match select(self.tick(), keyboard.next_event()).await {
                 Either::First(_) => {}
-                Either::Second(event) => {
-                    if let KeyboardEventPos::Key(KeyPos { row, col }) = event.pos
-                        && event.pressed
-                    {
-                        self.handle_key_event(row, col, true);
-                    }
-                }
+                Either::Second(event) => self.record_from_event(event),
             }
 
             // The state machine is time-driven, so the clock is sampled on every
             // pass — including the passes an event woke.
             let now = embassy_time::Instant::now().as_millis() as u32;
             self.advance_time(now);
+        }
+    }
+}
 
-            embassy_time::Timer::after_millis(TICK_INTERVAL_MS).await;
+impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
+    /// Record a key press from the event stream, if it is one.
+    ///
+    /// Only presses matter while `RGB_MATRIX_KEYRELEASES` is off, and only
+    /// `Key` positions carry an electrical row and column; a combo or a macro
+    /// has no single position to light.
+    fn record_from_event(&mut self, event: KeyboardEvent) {
+        if let KeyboardEventPos::Key(KeyPos { row, col }) = event.pos
+            && event.pressed
+        {
+            self.handle_key_event(row, col, true);
         }
     }
 }
