@@ -10,6 +10,10 @@
 //!
 //! - [`fx`] — the `lib8tion` integer math and colour conversion an effect is
 //!   written in terms of.
-//! - (planned) `led_config`, `state`, `runner`, `effects`, `vialrgb`.
+//! - [`led_config`] — the LED table: positions, flags and key mapping.
+//! - [`state`] — the run-time configuration and effect-switching rules.
+//! - (planned) `runner`, `effects`, `vialrgb`.
 
 pub mod fx;
+pub mod led_config;
+pub mod state;

@@ -271,7 +271,8 @@ pub const fn dim8_lin(x: u8) -> u8 {
     if x & 0x80 != 0 {
         scale8(x, x)
     } else {
-        (x + 1) / 2
+        // `div_ceil` rather than `(x + 1) / 2`, which would overflow at x = 255.
+        x.div_ceil(2)
     }
 }
 
@@ -293,7 +294,7 @@ pub const fn brighten8_video(x: u8) -> u8 {
 #[inline]
 pub const fn brighten8_lin(x: u8) -> u8 {
     let ix = 255 - x;
-    let ix = if ix & 0x80 != 0 { scale8(ix, ix) } else { (ix + 1) / 2 };
+    let ix = if ix & 0x80 != 0 { scale8(ix, ix) } else { ix.div_ceil(2) };
     255 - ix
 }
 

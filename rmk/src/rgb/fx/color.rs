@@ -9,8 +9,11 @@
 //! `hsv_to_rgb_impl` is not ported; `hsv_to_rgb` here is QMK's
 //! `hsv_to_rgb_nocie`.
 
+use serde::{Deserialize, Serialize};
+
 /// An HSV colour with QMK's byte ranges.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Hsv {
     /// Hue, `0..=255` for a full turn.
     pub h: u8,
@@ -46,7 +49,8 @@ impl Hsv {
 }
 
 /// An RGB colour, one byte per channel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Rgb {
     pub r: u8,
     pub g: u8,
