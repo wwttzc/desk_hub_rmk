@@ -21,15 +21,12 @@
 //! on a fixed cadence; the tests drive it by hand, which is what makes the
 //! batching contract testable without hardware.
 
-use embassy_futures::select::{Either, select};
-
 use super::fx::random8::Rng;
 use super::hit_tracker::HitTracker;
 use super::led_config::LedConfig;
 use super::registry::{self, EFFECT_OFF};
 use super::runner::{EffectParams, FrameAll, LedFrame, RenderContext};
 use super::state::RgbConfig;
-use crate::event::{EventSubscriber, KeyPos, KeyboardEvent, KeyboardEventPos, SubscribableEvent};
 
 /// `RGB_MATRIX_LED_FLUSH_LIMIT`: the minimum milliseconds between frames.
 ///
@@ -86,67 +83,22 @@ impl<T: LedFrame + FrameAll + LedDriver> FrameBuffer for T {}
 pub const TICK_INTERVAL_MS: u64 = 4;
 
 impl<const LED_COUNT: usize, F: FrameBuffer> crate::core_traits::Runnable for RgbEngine<LED_COUNT, F> {
-    /// Drive the task forever, feeding the hit tracker from the keyboard.
+    /// Drive the task forever.
     ///
     /// Each wake advances the state machine by one step and ages the hit
     /// tracker, so a reactive effect's decay follows real time rather than the
     /// number of frames.
-    ///
-    /// The task also subscribes to [`KeyboardEvent`]: the reactive effects, the
-    /// splash family and `TYPING_HEATMAP` all read the hit tracker, and the
-    /// engine owns it, so nothing else can fill it in. The subscription is what
-    /// makes a key press reach those effects at all.
     ///
     /// The clock is `embassy_time::Instant`, converted to the millisecond
     /// counter QMK's `g_rgb_timer` is. Truncating to `u32` wraps after about 49
     /// days of uptime; every comparison against it is `wrapping_sub`, so the
     /// wrap is handled the same way QMK handles it.
     async fn run(&mut self) -> ! {
-        let mut keyboard = KeyboardEvent::subscriber();
-        // `u32::MAX` as a "never ticked" sentinel: `wrapping_add` keeps the
-        // first comparison true whatever the clock's epoch is, so the first pass
-        // always ticks.
-        let mut next_tick_ms = u32::MAX;
-
         loop {
-            // `tick` is ready almost immediately — the drivers resolve on the
-            // spot and `Syncing` is a time check, not an `await`. Selecting on it
-            // unconditionally would let it win every race, and a subscriber that
-            // is never polled never sees its message. So the tick is only
-            // offered to `select` once its interval has actually elapsed;
-            // between ticks this task waits on the keyboard alone.
-            let now = embassy_time::Instant::now().as_millis() as u32;
-            if now.wrapping_sub(next_tick_ms) < TICK_INTERVAL_MS as u32 {
-                let event = keyboard.next_event().await;
-                self.record_from_event(event);
-                continue;
-            }
-            next_tick_ms = now.wrapping_add(TICK_INTERVAL_MS as u32);
-
-            match select(self.tick(), keyboard.next_event()).await {
-                Either::First(_) => {}
-                Either::Second(event) => self.record_from_event(event),
-            }
-
-            // The state machine is time-driven, so the clock is sampled on every
-            // pass — including the passes an event woke.
             let now = embassy_time::Instant::now().as_millis() as u32;
             self.advance_time(now);
-        }
-    }
-}
-
-impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
-    /// Record a key press from the event stream, if it is one.
-    ///
-    /// Only presses matter while `RGB_MATRIX_KEYRELEASES` is off, and only
-    /// `Key` positions carry an electrical row and column; a combo or a macro
-    /// has no single position to light.
-    fn record_from_event(&mut self, event: KeyboardEvent) {
-        if let KeyboardEventPos::Key(KeyPos { row, col }) = event.pos
-            && event.pressed
-        {
-            self.handle_key_event(row, col, true);
+            self.tick().await;
+            embassy_time::Timer::after_millis(TICK_INTERVAL_MS).await;
         }
     }
 }

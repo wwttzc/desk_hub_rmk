@@ -46,13 +46,6 @@ events = [
 features = []
 events = [{ name = "battery_status" }]
 
-# rgb/engine.rs: RgbEngine subscribes to KeyboardEvent so the reactive and
-# heat-map effects can see key presses. Without a reserved slot the engine's
-# subscriber() would exceed KEYBOARD_EVENT_SUB_SIZE and panic at startup.
-[[subscriber]]
-features = ["rgb"]
-events = [{ name = "keyboard" }]
-
 # --- BLE-gated internal subscribers ---
 
 [[subscriber]]
