@@ -165,6 +165,16 @@ impl RgbConfig {
         changed
     }
 
+    /// Overwrite the mode without clamping or the enabled check.
+    ///
+    /// [`set_mode`](Self::set_mode) intentionally clamps onto the effect table's
+    /// range, which is right for every real effect but wrong for the two
+    /// sentinels that sit outside it: `OFF` (0) and `DIRECT` (1). This is the
+    /// escape hatch those two use, so their handling stays in one place.
+    pub(crate) fn set_mode_raw(&mut self, mode: u16) {
+        self.mode = mode;
+    }
+
     /// `rgb_matrix_step_helper`: the next effect, wrapping back to the first.
     ///
     /// QMK walks the raw enum, not just the enabled subset; an effect that was

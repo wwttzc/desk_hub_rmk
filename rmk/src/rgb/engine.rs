@@ -121,6 +121,8 @@ pub struct RgbEngine<const LED_COUNT: usize, F: FrameBuffer> {
     rng: Rng,
     /// `RAINDROPS`'s `static uint16_t index`.
     raindrops_index: u16,
+    /// `g_direct_mode_colors`: per-LED colours the host set directly.
+    direct: super::vialrgb::DirectColors<LED_COUNT>,
     frame: F,
     ctx: FrameContext,
     /// Ledger mirror of `frame.params`, held separately so the effect call does
@@ -147,6 +149,7 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
             hits: HitTracker::new(),
             rng: Rng::new(),
             raindrops_index: u16::MAX,
+            direct: super::vialrgb::DirectColors::new(),
             frame,
             ctx: FrameContext::default(),
             process_limit: default_process_limit(LED_COUNT),
@@ -190,10 +193,52 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
         self.state
     }
 
+    /// Advance the task by one step, without an async context.
+    ///
+    /// `tick` never actually awaits: the only `await` is the driver's `flush`,
+    /// which for every driver in this crate resolves immediately. This wrapper
+    /// exists so tests that do not have a runtime can drive the machine, and it
+    /// panics rather than hanging if a driver ever does suspend.
+    #[cfg(any(test, feature = "std"))]
+    pub fn tick_sync(&mut self) -> TaskState {
+        fn poll_once<F: core::future::Future>(fut: F) -> Option<F::Output> {
+            use core::task::{Context, Poll, Waker};
+            fn noop_waker() -> Waker {
+                use core::task::{RawWaker, RawWakerVTable};
+                const VTABLE: RawWakerVTable = RawWakerVTable::new(|_| RAW, |_| {}, |_| {}, |_| {});
+                const RAW: RawWaker = RawWaker::new(core::ptr::null(), &VTABLE);
+                // Safety: every vtable entry is a no-op and no state is read
+                // through the null data pointer.
+                unsafe { Waker::from_raw(RAW) }
+            }
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            let mut fut = core::pin::pin!(fut);
+            match fut.as_mut().poll(&mut cx) {
+                Poll::Ready(out) => Some(out),
+                Poll::Pending => None,
+            }
+        }
+
+        poll_once(self.tick()).expect("the RGB driver suspended; drive it with `tick().await` instead")
+    }
+
     /// The frame buffer, for tests and for the flush-side driver.
     #[inline]
     pub fn frame(&self) -> &F {
         &self.frame
+    }
+
+    /// The host-driven pixel buffer, for `VIALRGB_DIRECT_FASTSET`.
+    #[inline]
+    pub fn direct_colors(&self) -> &super::vialrgb::DirectColors<LED_COUNT> {
+        &self.direct
+    }
+
+    /// Mutable access, so the protocol layer can write pixels.
+    #[inline]
+    pub fn direct_colors_mut(&mut self) -> &mut super::vialrgb::DirectColors<LED_COUNT> {
+        &mut self.direct
     }
 
     /// Feed a key event to the hit tracker.
@@ -276,6 +321,18 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
         // changed, which is how an effect knows to reset its one-shot state.
         self.ctx.params.init = (effect != self.ctx.last_effect) || (self.config.enable != self.ctx.last_enable);
 
+        // `DIRECT_MODE` renders the host's own pixels instead of an effect.
+        // Handled before the batch machinery: a direct frame is one batch, since
+        // there is no per-LED work to spread out.
+        if effect == super::vialrgb::DIRECT_MODE {
+            self.render_direct();
+            self.ctx.params.iter = self.ctx.params.iter.saturating_add(1);
+            self.ctx.last_effect = effect;
+            self.ctx.last_enable = self.config.enable;
+            self.state = TaskState::Flushing;
+            return;
+        }
+
         // Destructure so the effect sees disjoint borrows of the engine's
         // fields: the frame is written while the config, LED table, hits and RNG
         // are read. Going through `self` for each would borrow all of `self`
@@ -315,6 +372,19 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
             self.ctx.last_effect = effect;
             self.ctx.last_enable = self.config.enable;
             self.state = TaskState::Flushing;
+        }
+    }
+
+    /// Paint the frame from the host's `DIRECT_FASTSET` pixels.
+    ///
+    /// Every LED is written each frame, because a report carries only nine of
+    /// them and the rest must remain what the host set earlier; the engine's own
+    /// buffer is the memory of those earlier reports.
+    fn render_direct(&mut self) {
+        for i in 0..LED_COUNT {
+            let (h, s, v) = self.direct.get(i);
+            let rgb = super::fx::color::hsv_to_rgb(super::fx::color::Hsv::new(h, s, v));
+            self.frame.set_color(i, rgb);
         }
     }
 }

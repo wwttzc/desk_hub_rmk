@@ -17,7 +17,7 @@
 //! - [`effects`] — the effect bodies themselves, ported one per QMK file.
 //! - [`registry`] — the effect table: ids, names, config keys and dispatch.
 //! - [`engine`] — the task that renders frames and drives a LED driver.
-//! - (planned) `vialrgb`.
+//! - [`vialrgb`] — the VialRGB wire protocol: framing, decoding and encoding.
 
 pub mod effects;
 pub mod engine;
@@ -27,3 +27,4 @@ pub mod led_config;
 pub mod registry;
 pub mod runner;
 pub mod state;
+pub mod vialrgb;

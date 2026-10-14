@@ -86,6 +86,10 @@ pub trait LedFrame {
 }
 
 /// An in-memory frame, for tests and for drivers that want a staging buffer.
+///
+/// It is also a usable [`LedDriver`](crate::rgb::engine::LedDriver): flushing
+/// does nothing, because the pixels already live in `self`. A test that wants to
+/// observe flushes should wrap it in its own driver instead.
 #[derive(Clone, Debug)]
 pub struct ArrayFrame<const LED_COUNT: usize> {
     pub pixels: [Rgb; LED_COUNT],
@@ -114,6 +118,18 @@ impl<const LED_COUNT: usize> LedFrame for ArrayFrame<LED_COUNT> {
     #[inline]
     fn set_color(&mut self, index: usize, rgb: Rgb) {
         self.pixels[index] = rgb;
+    }
+}
+
+impl<const LED_COUNT: usize> FrameAll for ArrayFrame<LED_COUNT> {
+    fn set_all(&mut self, rgb: Rgb) {
+        self.fill(rgb);
+    }
+}
+
+impl<const LED_COUNT: usize> crate::rgb::engine::LedDriver for ArrayFrame<LED_COUNT> {
+    async fn flush(&mut self) {
+        // The pixels are already in memory; a real driver would shift them out.
     }
 }
 
@@ -372,12 +388,6 @@ pub fn rgb_matrix_none<F: LedFrame + FrameAll>(params: &EffectParams, frame: &mu
 /// `rgb_matrix_set_color_all`, needed by [`rgb_matrix_none`].
 pub trait FrameAll {
     fn set_all(&mut self, rgb: Rgb);
-}
-
-impl<const LED_COUNT: usize> FrameAll for ArrayFrame<LED_COUNT> {
-    fn set_all(&mut self, rgb: Rgb) {
-        self.fill(rgb);
-    }
 }
 
 /// `point[i] - center`, in the signed form the C promotes to.
