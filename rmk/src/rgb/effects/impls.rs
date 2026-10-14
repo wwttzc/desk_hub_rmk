@@ -514,7 +514,7 @@ pub fn pixel_rain_interval(speed: u8) -> u32 {
 /// batch that owns its index. The timer is rearmed and a fresh index drawn on
 /// the frame's **last** batch, which is where QMK does it, so the cadence does
 /// not depend on which batch the current index happens to fall into.
-pub fn pixel_rain<const LED_COUNT: usize, F: LedFrame>(
+pub fn pixel_rain<const LED_COUNT: usize, F: LedFrame + crate::rgb::runner::FrameAll>(
     ctx: &RenderContext<'_, LED_COUNT>,
     params: &EffectParams,
     rng: &mut Rng,
@@ -524,8 +524,13 @@ pub fn pixel_rain<const LED_COUNT: usize, F: LedFrame>(
 ) -> bool {
     // `params->iter == 0 && params->init`: a fresh index on the first frame, so
     // the first cycle has a target rather than the zero the field starts at.
+    //
+    // The chain is also blanked here. A cycle writes exactly one LED, so without
+    // this every other LED would keep whatever the previous effect left behind
+    // and the keyboard would never go dark on a switch.
     if params.iter == 0 && params.init {
         *index = rng.next8_max(LED_COUNT as u8);
+        frame.set_all(Rgb::BLACK);
     }
 
     let (led_min, led_max) = params.limits(ctx.process_limit, LED_COUNT);
@@ -781,26 +786,30 @@ pub fn typing_heatmap<const LED_COUNT: usize, F: LedFrame>(
     end < cells
 }
 
-/// `DIGITAL_RAIN`'s colour for one cell: a dim green ramp, saturating to white
-/// at the head of a droplet.
+/// `DIGITAL_RAIN`'s colour for one cell: a green ramp whose head saturates to
+/// white.
 ///
-/// The three levels all derive from the configured brightness, as QMK's do, so
-/// the effect follows the value slider and `max_brightness` instead of pinning
-/// itself to full scale.
+/// The levels derive from the configured brightness, as QMK's do, so the effect
+/// follows the value slider and `max_brightness` instead of pinning itself to
+/// full scale.
 ///
-/// The divisions are computed in `u32` and narrowed last, because the C carries
-/// them in `int` and only truncates on assignment to the `uint8_t` channel.
-/// `intensity` is never above `max_intensity` on a real frame — a droplet is
-/// spawned at the ceiling and only ever decays from it — so the quotient fits a
-/// byte and the narrowing is exact.
+/// The boost channel ramps with `intensity`, so it reaches `max_intensity`
+/// exactly at the head: the droplet is balanced white at its peak and green
+/// behind it, with no tint drift as the slider moves. QMK's `3v/4` ceiling —
+/// `max_brightness_boost = (v * 3) >> 2` — stops one part in four short, which
+/// makes the head a dim mint rather than white; the trail is unaffected either
+/// way, since `green` is `4 * intensity / 3` below the threshold.
 pub fn digital_rain_color(intensity: u8, max_intensity: u8) -> Rgb {
     let pure_green_intensity = ((max_intensity as u32) * 3 / 4) as u8;
-    let max_brightness_boost = ((max_intensity as u32) * 3 / 4) as u8;
+    // Zero brightness has no scale to divide by and nothing to show.
+    if pure_green_intensity == 0 {
+        return Rgb::BLACK;
+    }
 
     if intensity > pure_green_intensity {
-        let boost = ((max_brightness_boost as u32 * (intensity - pure_green_intensity) as u32)
-            / (max_intensity - pure_green_intensity) as u32) as u8;
-        Rgb::new(boost, max_intensity, boost)
+        // `intensity` runs `(3v/4, v]`, so the boost runs `(0, v]`: white at the
+        // head, green at the threshold where the branch takes over.
+        Rgb::new(intensity, max_intensity, intensity)
     } else {
         let green = ((max_intensity as u32 * intensity as u32) / pure_green_intensity as u32) as u8;
         Rgb::new(0, green, 0)
@@ -1167,6 +1176,12 @@ pub fn raindrops<const LED_COUNT: usize, F: LedFrame>(
 
     let (led_min, led_max) = params.limits(ctx.process_limit, LED_COUNT);
     if params.init {
+        // Blank the chain before seeding it. Only the LEDs this effect owns are
+        // repainted afterwards, so without the clear the rest would keep the
+        // previous effect's colour and only ever flicker rather than change.
+        for i in 0..LED_COUNT {
+            frame.set_color(i, Rgb::BLACK);
+        }
         for i in led_min..led_max {
             if !has_any_flags(ctx.leds.flags(i as usize), params.flags) {
                 continue;
@@ -2133,27 +2148,116 @@ mod tests {
         assert_eq!(frames_advanced, 8, "each frame of the walk should advance the pattern");
     }
 
-    /// `DIGITAL_RAIN`'s scale follows the configured brightness: a lower value
-    /// dims the whole effect rather than only the global scale.
+    /// `DIGITAL_RAIN`'s head is balanced white and its trail is green, at every
+    /// brightness: adjusting the slider must not tint the droplet.
     #[test]
-    fn digital_rain_colours_follow_the_configured_brightness() {
-        // QMK: max_intensity = v, pure_green = boost = 3v/4, so a head at the
-        // maximum intensity is `(3v/4, v, 3v/4)` — `3 * 255 >> 2 == 191`.
-        let bright = digital_rain_color(255, 255);
-        assert_eq!(bright, Rgb::new(191, 255, 191));
+    fn digital_rain_head_is_white_at_every_brightness() {
+        // The head is spawned at `max_intensity`, so that is the colour a viewer
+        // sees at the leading edge of a droplet.
+        for max in [255u8, 200, 128, 100, 64, 40] {
+            let head = digital_rain_color(max, max);
+            assert_eq!(
+                head,
+                Rgb::new(max, max, max),
+                "at max_intensity {max} the head must be white, not tinted"
+            );
+        }
 
-        let dim = digital_rain_color(100, 100);
-        assert_eq!(dim, Rgb::new(75, 100, 75), "the whole head follows the ceiling down");
+        // The tint cannot drift with the slider either: for any ceiling, the head
+        // is exactly balanced and every cell on the boost ramp keeps `red ==
+        // blue`, with `red <= green` and approaching it as the cell nears the
+        // head. That is the property QMK's `3v/4` ceiling breaks.
+        for max in [255u8, 200, 128, 100, 40, 4] {
+            let pure_green = (max as u32 * 3 / 4) as u8;
+            for intensity in pure_green..=max {
+                let c = digital_rain_color(intensity, max);
+                assert_eq!(c.r, c.b, "ceiling {max}, intensity {intensity}: red must equal blue");
+                assert!(c.r <= c.g, "ceiling {max}, intensity {intensity}: the head is not green");
+                assert_eq!(c.g, max, "the green reference is the ceiling");
+            }
+            // And it reaches pure white at the head rather than stopping short.
+            assert_eq!(digital_rain_color(max, max), Rgb::new(max, max, max));
+        }
+    }
 
-        // The green ramp below the threshold is `v * intensity / (3v/4)`, which
-        // cancels to `4 * intensity / 3`: the same at either ceiling, because the
-        // pure-green reference scales with the brightness too.
+    /// Below the threshold the green ramp is `v * intensity / (3v/4)`, which
+    /// cancels to `4 * intensity / 3` — independent of the ceiling.
+    #[test]
+    fn digital_rain_green_ramp_scales_to_its_own_ceiling() {
         assert_eq!(digital_rain_color(51, 255).g, 68);
         assert_eq!(digital_rain_color(51, 100).g, 68);
 
-        // At the threshold the boost is zero, so the head is pure green.
+        // At the threshold the boost is zero, so the cell is pure green.
         assert_eq!(digital_rain_color(191, 255).r, 0);
         assert_eq!(digital_rain_color(75, 100).r, 0);
+
+        // Zero brightness is black and must not divide by zero.
+        assert_eq!(digital_rain_color(0, 0).r, 0);
+    }
+
+    /// `RAINDROPS` and `PIXEL_RAIN` must blank the chain on the frame they become
+    /// the selected effect.
+    ///
+    /// Both only ever touch a subset of the LEDs afterwards — `PIXEL_RAIN` writes
+    /// exactly one per cycle — so without the clear every other LED keeps the
+    /// previous effect's colour forever and a switch looks like a frozen frame
+    /// with a few LEDs flickering.
+    #[test]
+    fn raindrop_effects_blank_the_chain_on_switch() {
+        use crate::rgb::led_config::{LedConfig, LedPoint};
+        use crate::rgb::runner::ArrayFrame;
+
+        let leds = Box::leak(Box::new(LedConfig::from_matrix(
+            [
+                LedPoint::new(0, 0),
+                LedPoint::new(44, 0),
+                LedPoint::new(88, 0),
+                LedPoint::new(132, 0),
+            ],
+            [(0, 0), (0, 1), (0, 2), (0, 3)],
+        )));
+        let config = RgbConfig::with_defaults(true, 100, 200, 128, 0xFF, 255);
+        let ctx = RenderContext {
+            leds,
+            config: &config,
+            center: RenderContext::<4>::DEFAULT_CENTER,
+            time: 1000,
+            process_limit: 4,
+        };
+        let init = EffectParams {
+            iter: 0,
+            flags: 0xFF,
+            init: true,
+        };
+        // A stale frame from whatever ran before, in a colour neither effect
+        // produces at this seed.
+        let stale = Rgb::new(255, 0, 255);
+
+        // `PIXEL_RAIN`: nothing but black survives its first frame.
+        let mut frame = ArrayFrame::<4>::new();
+        frame.fill(stale);
+        let mut index = 0u8;
+        let mut wait = 0u32;
+        let mut rng = Rng::with_seed(4);
+        pixel_rain(&ctx, &init, &mut rng, &mut index, &mut wait, &mut frame);
+        assert_eq!(frame.pixels, [Rgb::BLACK; 4], "PIXEL_RAIN starts from black");
+
+        // `RAINDROPS`: the init pass re-seeds every LED, so none carries the old
+        // colour. Its own palette is random, so assert against the stale value
+        // rather than against black.
+        let mut frame = ArrayFrame::<4>::new();
+        frame.fill(stale);
+        let mut rdrop_index = u16::MAX;
+        let mut rng = Rng::with_seed(4);
+        raindrops(&ctx, &init, &mut rng, &mut rdrop_index, &mut frame);
+        assert!(
+            frame.pixels.iter().all(|p| *p != stale),
+            "RAINDROPS must not carry the previous frame's colour"
+        );
+        assert!(
+            frame.pixels.iter().all(|p| *p != Rgb::BLACK),
+            "and its init pass seeds the whole chain"
+        );
     }
 
     /// The heat spread is measured in LED coordinates, not matrix steps: a key
