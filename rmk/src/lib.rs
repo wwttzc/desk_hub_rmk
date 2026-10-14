@@ -80,6 +80,11 @@ pub use keymap::KeymapData;
 pub use rmk_macro as macros;
 // Spells a macro's text as `MacroOp::Char`s: `text!("hi")`.
 pub use rmk_macro::text;
+// Re-exported so the generated RGB driver code can name the colour type without
+// the user's crate having to depend on `smart-leds-trait` itself — the same
+// reason `rmk_types` is re-exported below.
+#[cfg(feature = "smart_leds")]
+pub use smart_leds_trait;
 pub use rmk_types as types;
 #[cfg(feature = "_ble")]
 pub use trouble_host::prelude::*;

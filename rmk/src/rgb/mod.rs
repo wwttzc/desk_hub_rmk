@@ -21,6 +21,8 @@
 //! - [`shared`] — the state the protocol and the engine both reach.
 //! - [`via`] — the VIA command handlers that connect the two.
 //! - [`storage`] — persistence for the VIA `CustomSave` (0x09) path.
+//! - [`drivers`] — the bridge to a `smart-leds` driver such as
+//!   `esp-hal-smartled`.
 
 pub mod effects;
 pub mod engine;
@@ -35,3 +37,6 @@ pub mod state;
 pub mod storage;
 pub mod via;
 pub mod vialrgb;
+
+#[cfg(feature = "smart_leds")]
+pub mod drivers;

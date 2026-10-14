@@ -372,6 +372,12 @@ pub struct Ws2812Config {
     /// Absent lets the driver decide; a long chain may need more than one.
     #[serde(default)]
     pub rmt_memsize: Option<u8>,
+    /// The RMT source clock in MHz, which the driver derives its pulse codes
+    /// from.
+    ///
+    /// Must match the rate the peripheral is created with. Defaults to 80.
+    #[serde(default)]
+    pub rmt_freq_mhz: Option<u32>,
 }
 
 impl Default for Ws2812Config {
@@ -382,6 +388,7 @@ impl Default for Ws2812Config {
             rgbw: false,
             color_order: None,
             rmt_memsize: None,
+            rmt_freq_mhz: None,
         }
     }
 }

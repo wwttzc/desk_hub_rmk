@@ -75,6 +75,34 @@ pub trait FrameBuffer: LedFrame + FrameAll + LedDriver {}
 
 impl<T: LedFrame + FrameAll + LedDriver> FrameBuffer for T {}
 
+/// How often the engine's task wakes to advance the state machine.
+///
+/// Not the frame rate: `flush_limit_ms` decides that, and the task only has to
+/// wake often enough to honour it. A quarter of the default 16 ms limit keeps
+/// the frame timing within a few milliseconds while leaving the core free.
+pub const TICK_INTERVAL_MS: u64 = 4;
+
+impl<const LED_COUNT: usize, F: FrameBuffer> crate::core_traits::Runnable for RgbEngine<LED_COUNT, F> {
+    /// Drive the task forever.
+    ///
+    /// Each wake advances the state machine by one step and ages the hit
+    /// tracker, so a reactive effect's decay follows real time rather than the
+    /// number of frames.
+    ///
+    /// The clock is `embassy_time::Instant`, converted to the millisecond
+    /// counter QMK's `g_rgb_timer` is. Truncating to `u32` wraps after about 49
+    /// days of uptime; every comparison against it is `wrapping_sub`, so the
+    /// wrap is handled the same way QMK handles it.
+    async fn run(&mut self) -> ! {
+        loop {
+            let now = embassy_time::Instant::now().as_millis() as u32;
+            self.advance_time(now);
+            self.tick().await;
+            embassy_time::Timer::after_millis(TICK_INTERVAL_MS).await;
+        }
+    }
+}
+
 /// The per-frame scratch the engine keeps between ticks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FrameContext {

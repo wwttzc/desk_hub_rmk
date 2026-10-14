@@ -272,26 +272,30 @@ fn expand_driver(ws: &Ws2812Config, chip: &ChipModel, led_count: usize) -> Resul
 
     match (&chip.series, driver) {
         (ChipSeries::Esp32, "rmt") => {
-            let memsize = ws.rmt_memsize.unwrap_or(2);
+            let memsize = ws.rmt_memsize.unwrap_or(1);
+            // `new_with_memsize` takes the RMT source rate as its last argument:
+            // the driver derives its pulse codes from it, so the value must match
+            // the rate the peripheral was created with.
+            let freq_mhz = ws.rmt_freq_mhz.unwrap_or(80);
             Ok(quote! {
                 let leds = {
-                    let rmt = ::esp_hal::rmt::Rmt::new(
-                        p.RMT,
-                        ::esp_hal::time::Rate::from_mhz(80),
-                    )
-                    .expect("failed to initialise the RMT peripheral");
-                    ::esp_hal_smartled::RmtSmartLeds::<
-                        { ::esp_hal_smartled::buffer_size::<::smart_leds_trait::RGB8>(#led_count) },
+                    let _rmt_rate = ::esp_hal::time::Rate::from_mhz(#freq_mhz);
+                    let _rmt = ::esp_hal::rmt::Rmt::new(p.RMT, _rmt_rate)
+                        .expect("failed to initialise the RMT peripheral");
+                    let _chain = ::esp_hal_smartled::RmtSmartLeds::<
+                        { ::esp_hal_smartled::buffer_size::<::rmk::smart_leds_trait::RGB8>(#led_count) },
                         _,
-                        ::smart_leds_trait::RGB8,
+                        ::rmk::smart_leds_trait::RGB8,
                         #order_ident,
                     >::new_with_memsize(
                         ::esp_hal_smartled::WS2812B_TIMING,
-                        rmt.channel0,
+                        _rmt.channel0,
                         p.#pin_ident,
                         #memsize,
+                        _rmt_rate,
                     )
-                    .expect("failed to initialise the WS2812 driver")
+                    .expect("failed to initialise the WS2812 driver");
+                    ::rmk::rgb::drivers::SmartLedsFrame::<#led_count, _>::new(_chain)
                 };
             })
         }

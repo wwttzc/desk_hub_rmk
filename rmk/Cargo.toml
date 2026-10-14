@@ -85,6 +85,10 @@ embassy-boot = { version = "0.7", optional = true, default-features = false }
 # ESP32 dependencies
 esp-hal = { version = "1.2.0-rc.0", optional = true }
 
+# Smart-LED colour types, shared with `esp-hal-smartled` and the other
+# `smart-leds` drivers. Only the trait crate, so no driver is pulled in here.
+smart-leds-trait = { version = "0.3", optional = true }
+
 # Document feature
 document-features = "0.2"
 
@@ -157,6 +161,11 @@ storage = [
 ## effects together with VialRGB (`lighting: "vialrgb"`) support. The effect
 ## engine is chip-independent; the user's crate supplies the smart-LED driver.
 rgb = []
+
+## Enable the adapter that drives a `smart-leds` implementation such as
+## `esp-hal-smartled`. Implied by the ESP32 chip features; enable it directly on
+## a board whose driver is a `smart-leds` crate.
+smart_leds = ["rgb", "dep:smart-leds-trait"]
 
 ## Enable defmt support
 defmt = [
