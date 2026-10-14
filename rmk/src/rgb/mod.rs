@@ -14,8 +14,10 @@
 //! - [`state`] — the run-time configuration and effect-switching rules.
 //! - [`hit_tracker`] — recent key hits, the input to reactive effects.
 //! - [`runner`] — the generic runners and the batched-iteration contract.
-//! - (planned) `effects`, `vialrgb`.
+//! - [`effects`] — the effect bodies themselves, ported one per QMK file.
+//! - (planned) `vialrgb`.
 
+pub mod effects;
 pub mod fx;
 pub mod hit_tracker;
 pub mod led_config;
