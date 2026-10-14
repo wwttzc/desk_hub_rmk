@@ -401,7 +401,6 @@ pub fn raindrops<const LED_COUNT: usize, F: LedFrame>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rgb::fx::trig8::sin8;
     use crate::rgb::led_config::{LedConfig, LedPoint, LED_FLAG_ALL, LED_FLAG_KEYLIGHT, LED_FLAG_MODIFIER};
     use crate::rgb::runner::ArrayFrame;
 

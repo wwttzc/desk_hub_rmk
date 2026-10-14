@@ -59,11 +59,12 @@ pub const DEFAULT_FLAG_STEPS: [u8; 4] = [
 pub struct RgbConfig {
     /// Whether the LEDs are on at all (`rgb_config_t::enable`, 2 bits in C).
     pub enable: bool,
-    /// The active effect id (`rgb_config_t::mode`, 6 bits in C).
+    /// The active effect id (`rgb_config_t::mode`, 6 bits in C — which is why
+    /// QMK tops out at 64 effects).
     ///
-    /// `0` is reserved for "none/off" the way QMK's `RGB_MATRIX_NONE` is, so
-    /// real effect ids start at 1. See [`RgbConfig::set_mode`] for the clamping.
-    pub mode: u8,
+    /// Ids are [`crate::rgb::registry`]'s, i.e. VialRGB's numbering: `0` means
+    /// off, `1` means host-driven direct colour, and real effects start at 2.
+    pub mode: u16,
     /// Global colour.
     pub hsv: Hsv,
     /// Animation speed, `0..=255`. Each effect interprets it its own way.
@@ -97,9 +98,9 @@ impl RgbConfig {
     ) -> Self {
         Self {
             enable,
-            // Filled in by `set_mode`; 1 is QMK's first real effect and the
-            // value `rgb_matrix_mode_noeeprom` clamps an out-of-range mode to.
-            mode: 1,
+            // The first selectable effect. `set_mode` clamps an out-of-range
+            // mode onto the table's ends, which `registry` owns.
+            mode: super::registry::EFFECT_FIRST,
             hsv: Hsv::new(hue, sat, max_brightness),
             speed,
             flags,
@@ -132,24 +133,28 @@ impl RgbConfig {
 
     /// `rgb_matrix_get_mode`.
     #[inline]
-    pub const fn mode(&self) -> u8 {
+    pub const fn mode(&self) -> u16 {
         self.mode
     }
 
     /// `rgb_matrix_mode_eeprom_helper`'s clamping.
     ///
-    /// QMK refuses to change the mode while disabled, clamps below 1 up to 1,
-    /// and clamps at or above the effect count down to the last effect.
-    /// `effect_max` is `RGB_MATRIX_EFFECT_MAX`.
+    /// QMK refuses to change the mode while disabled, clamps a mode below the
+    /// first effect up to it, and clamps one at or past the effect count down to
+    /// the last. `effect_max` is `RGB_MATRIX_EFFECT_MAX`.
+    ///
+    /// The range ends come from [`crate::rgb::registry`], so the clamps track the
+    /// effect table instead of a hard-coded 1.
     ///
     /// Returns `true` when the mode actually changed, which the caller uses to
     /// decide whether a frame must be re-rendered from scratch.
-    pub fn set_mode(&mut self, mode: u8, effect_max: u8) -> bool {
+    pub fn set_mode(&mut self, mode: u16, effect_max: u16) -> bool {
         if !self.enable {
             return false;
         }
-        let clamped = if mode < 1 {
-            1
+        let first = super::registry::EFFECT_FIRST;
+        let clamped = if mode < first {
+            first
         } else if mode >= effect_max {
             effect_max.saturating_sub(1)
         } else {
@@ -160,21 +165,30 @@ impl RgbConfig {
         changed
     }
 
-    /// `rgb_matrix_step_helper`: the next effect, wrapping back to 1.
+    /// `rgb_matrix_step_helper`: the next effect, wrapping back to the first.
     ///
-    /// QMK walks the raw enum, not just the enabled subset; effects that were
-    /// compiled out simply have no `case` and render nothing, so the subset
+    /// QMK walks the raw enum, not just the enabled subset; an effect that was
+    /// compiled out simply has no implementation and falls back, so the subset
     /// that matters is the one the user enabled at build time.
-    pub fn step_mode(&mut self, effect_max: u8) -> bool {
+    pub fn step_mode(&mut self, effect_max: u16) -> bool {
         let next = self.mode.wrapping_add(1);
-        let next = if next < effect_max { next } else { 1 };
+        let next = if next < effect_max {
+            next
+        } else {
+            super::registry::EFFECT_FIRST
+        };
         self.set_mode(next, effect_max)
     }
 
     /// `rgb_matrix_step_reverse_helper`.
-    pub fn step_mode_reverse(&mut self, effect_max: u8) -> bool {
+    pub fn step_mode_reverse(&mut self, effect_max: u16) -> bool {
+        let first = super::registry::EFFECT_FIRST;
         let prev = self.mode.wrapping_sub(1);
-        let prev = if prev < 1 { effect_max.saturating_sub(1) } else { prev };
+        let prev = if prev < first {
+            effect_max.saturating_sub(1)
+        } else {
+            prev
+        };
         self.set_mode(prev, effect_max)
     }
 
@@ -331,8 +345,10 @@ mod tests {
     use super::*;
     use crate::rgb::led_config::{LED_FLAG_ALL, LED_FLAG_NONE, LED_FLAG_UNDERGLOW};
 
-    /// A stand-in for `RGB_MATRIX_EFFECT_MAX` from a small build.
-    const EFFECT_MAX: u8 = 10;
+    /// A stand-in for `RGB_MATRIX_EFFECT_MAX` from a build with only a few
+    /// effects enabled. Deliberately smaller than the real table so the clamps
+    /// are exercised at a boundary the tests control.
+    const EFFECT_MAX: u16 = 10;
 
     #[test]
     fn defaults_match_qmk() {
@@ -342,7 +358,11 @@ mod tests {
         assert_eq!(config.sat(), DEFAULT_SAT);
         assert_eq!(config.speed(), DEFAULT_SPD);
         assert_eq!(config.flags(), DEFAULT_FLAGS);
-        assert_eq!(config.mode(), 1, "mode starts at QMK's first real effect");
+        assert_eq!(
+            config.mode(),
+            crate::rgb::registry::EFFECT_FIRST,
+            "mode starts at the first selectable effect"
+        );
     }
 
     #[test]
@@ -354,13 +374,15 @@ mod tests {
 
     #[test]
     fn mode_clamping_matches_qmk() {
+        use crate::rgb::registry::{EFFECT_FIRST, EFFECT_MAX};
+
         let mut config = RgbConfig::default();
 
-        assert!(!config.set_mode(0, EFFECT_MAX), "0 clamps to 1, already there");
-        assert_eq!(config.mode(), 1);
+        assert!(!config.set_mode(0, EFFECT_MAX), "0 clamps up to the first effect, already there");
+        assert_eq!(config.mode(), EFFECT_FIRST);
 
-        assert!(config.set_mode(5, EFFECT_MAX));
-        assert_eq!(config.mode(), 5);
+        assert!(config.set_mode(6, EFFECT_MAX));
+        assert_eq!(config.mode(), 6);
 
         // At or past the effect count clamps to the last effect.
         assert!(config.set_mode(EFFECT_MAX, EFFECT_MAX));
@@ -370,23 +392,27 @@ mod tests {
 
     #[test]
     fn mode_changes_are_refused_while_disabled() {
+        use crate::rgb::registry::{EFFECT_FIRST, EFFECT_MAX};
+
         let mut config = RgbConfig::default();
         config.disable();
         assert!(!config.set_mode(4, EFFECT_MAX));
-        assert_eq!(config.mode(), 1, "the mode is untouched");
+        assert_eq!(config.mode(), EFFECT_FIRST, "the mode is untouched");
         config.enable();
         assert!(config.set_mode(4, EFFECT_MAX));
     }
 
     #[test]
     fn stepping_wraps_at_both_ends() {
+        use crate::rgb::registry::{EFFECT_FIRST, EFFECT_MAX};
+
         let mut config = RgbConfig::default();
 
         config.set_mode(EFFECT_MAX - 1, EFFECT_MAX);
         assert!(config.step_mode(EFFECT_MAX));
-        assert_eq!(config.mode(), 1, "past the last effect wraps to the first");
+        assert_eq!(config.mode(), EFFECT_FIRST, "past the last effect wraps to the first");
 
-        config.set_mode(1, EFFECT_MAX);
+        config.set_mode(EFFECT_FIRST, EFFECT_MAX);
         assert!(config.step_mode_reverse(EFFECT_MAX));
         assert_eq!(config.mode(), EFFECT_MAX - 1, "before the first wraps to the last");
     }

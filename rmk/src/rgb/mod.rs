@@ -15,11 +15,13 @@
 //! - [`hit_tracker`] — recent key hits, the input to reactive effects.
 //! - [`runner`] — the generic runners and the batched-iteration contract.
 //! - [`effects`] — the effect bodies themselves, ported one per QMK file.
-//! - (planned) `vialrgb`.
+//! - [`registry`] — the effect table: ids, names, config keys and dispatch.
+//! - (planned) `engine`, `vialrgb`.
 
 pub mod effects;
 pub mod fx;
 pub mod hit_tracker;
 pub mod led_config;
+pub mod registry;
 pub mod runner;
 pub mod state;
