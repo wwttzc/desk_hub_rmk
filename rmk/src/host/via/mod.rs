@@ -126,16 +126,54 @@ impl<'a> VialService<'a> {
                 warn!("Dynamic keymap reset -- not supported")
             }
             ViaCommand::CustomSetValue => {
-                // backlight/rgblight/rgb matrix/led matrix/audio settings here
+                // VialRGB's write path: `SET_MODE` and `DIRECT_FASTSET`. The
+                // RGB module keeps the report's framing, so only the outcome
+                // matters here.
+                #[cfg(feature = "rgb")]
+                match crate::rgb::via::handle_set(&mut report.input_data) {
+                    crate::rgb::via::Outcome::Unsupported => {
+                        warn!("Custom set value -- not supported")
+                    }
+                    // `handle_set` marks the configuration dirty itself; the
+                    // flag is what `CustomSave` later consumes.
+                    crate::rgb::via::Outcome::Changed | crate::rgb::via::Outcome::Handled => {}
+                }
+                // Without the RGB feature there is nothing to configure, and the
+                // report keeps its request bytes, which is the "unhandled"
+                // signal the host already understands.
+                #[cfg(not(feature = "rgb"))]
                 warn!("Custom set value -- not supported")
             }
             ViaCommand::CustomGetValue => {
-                // backlight/rgblight/rgb matrix/led matrix/audio settings here
+                // VialRGB's read path: `GET_INFO`, `GET_MODE`, `GET_SUPPORTED`
+                // (paged), `GET_NUMBER_LEDS` and `GET_LED_INFO`.
+                #[cfg(feature = "rgb")]
+                match crate::rgb::via::handle_get(&mut report.input_data) {
+                    crate::rgb::via::Outcome::Unsupported => {
+                        warn!("Custom get value -- not supported")
+                    }
+                    _ => {}
+                }
+                #[cfg(not(feature = "rgb"))]
                 warn!("Custom get value -- not supported")
             }
             ViaCommand::CustomSave => {
-                // backlight/rgblight/rgb matrix/led matrix/audio settings here
-                warn!("Custom get value -- not supported")
+                // `eeconfig_force_flush_rgb_matrix`: persist the RGB config.
+                #[cfg(all(feature = "rgb", feature = "storage"))]
+                if crate::rgb::via::needs_save() {
+                    let config = crate::rgb::via::config_for_storage();
+                    match crate::rgb::storage::save(config).await {
+                        Ok(()) => crate::rgb::via::mark_saved(),
+                        Err(()) => error!("Failed to save the RGB configuration"),
+                    }
+                }
+                #[cfg(all(feature = "rgb", not(feature = "storage")))]
+                if crate::rgb::via::needs_save() {
+                    crate::rgb::via::mark_saved();
+                    warn!("RGB configuration changed but not saved: there is no storage");
+                }
+                #[cfg(not(feature = "rgb"))]
+                warn!("Custom save -- not supported")
             }
             ViaCommand::EepromReset => {
                 warn!("Resetting storage..");

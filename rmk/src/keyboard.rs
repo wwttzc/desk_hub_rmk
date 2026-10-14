@@ -6,6 +6,7 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer, with_deadline};
 use heapless::Vec;
 use rmk_types::action::{Action, KeyAction, KeyboardAction};
+use rmk_types::action::LightAction;
 use rmk_types::fork::StateBits;
 use rmk_types::keyboard_macros::MacroOp;
 use rmk_types::keycode::{ConsumerKey, HidKeyCode, KeyCode, SpecialKey, SystemControlKey, from_ascii};
@@ -1322,7 +1323,7 @@ impl<'a> Keyboard<'a> {
                 self.update_osl(event);
             }
             Action::OneShotKey(_k) => warn!("One-shot key is not supported: {:?}", action),
-            Action::Light(_light_action) => warn!("Light control is not supported"),
+            Action::Light(light_action) => self.process_action_light(light_action, event),
             Action::KeyboardControl(c) => self.process_action_keyboard_control(c, event).await,
             Action::Special(special_key) => self.process_action_special(special_key, event).await,
             Action::User(id) => self.process_user(id, event).await,
@@ -1485,8 +1486,128 @@ impl<'a> Keyboard<'a> {
         };
     }
 
-    async fn process_action_keyboard_control(&mut self, keyboard_control: KeyboardAction, event: KeyboardEvent) {
-        match keyboard_control {
+    /// Handle a light-control keycode, `Action::Light`.
+    ///
+    /// The three families in QMK's `LightAction` address different subsystems,
+    /// and only one of them exists here:
+    ///
+    /// - `Rgb*` **operations** map onto the RGB Matrix's global state — the same
+    ///   state Vial's `SET_MODE` writes — so a keycode and the GUI stay in step.
+    /// - `RgbMode*` **names** come from QMK's `rgblight` subsystem, not
+    ///   `rgb_matrix`. Each is mapped onto the closest `rgb_matrix` effect.
+    /// - `Backlight*` drives single-colour backlighting, which this board has no
+    ///   hardware for, so it is ignored.
+    ///
+    /// Acting on press only: a keycode that toggled on both edges would flip
+    /// twice per keystroke.
+    #[cfg(feature = "rgb")]
+    fn process_action_light(&mut self, light_action: LightAction, event: KeyboardEvent) {
+        use rmk_types::action::LightAction as LA;
+
+        use crate::rgb::via::{self, Component};
+
+        if !event.pressed {
+            return;
+        }
+
+        match light_action {
+            // ---- RGB Matrix operations ----
+            // The setters report whether anything changed; a keycode has nobody
+            // to tell, so the result is dropped.
+            LA::RgbTog => {
+                let _ = via::toggle();
+            }
+            LA::RgbModeForward => {
+                let _ = via::step_mode(true);
+            }
+            LA::RgbModeReverse => {
+                let _ = via::step_mode(false);
+            }
+            LA::RgbHui => {
+                let _ = via::adjust(Component::Hue, true);
+            }
+            LA::RgbHud => {
+                let _ = via::adjust(Component::Hue, false);
+            }
+            LA::RgbSai => {
+                let _ = via::adjust(Component::Sat, true);
+            }
+            LA::RgbSad => {
+                let _ = via::adjust(Component::Sat, false);
+            }
+            LA::RgbVai => {
+                let _ = via::adjust(Component::Val, true);
+            }
+            LA::RgbVad => {
+                let _ = via::adjust(Component::Val, false);
+            }
+            LA::RgbSpi => {
+                let _ = via::adjust(Component::Speed, true);
+            }
+            LA::RgbSpd => {
+                let _ = via::adjust(Component::Speed, false);
+            }
+
+            // ---- `rgblight` effect names, mapped onto `rgb_matrix` effects ----
+            // The mapping is not one-to-one: `rgblight` has several variants of
+            // each animation where `rgb_matrix` has a single named effect, so
+            // each picks the closest match. Ids are the registry's VialRGB ids.
+            LA::RgbModePlain => {
+                let _ = via::select_effect(2); // SOLID_COLOR
+            }
+            LA::RgbModeBreathe => {
+                let _ = via::select_effect(6); // BREATHING
+            }
+            LA::RgbModeRainbow => {
+                let _ = via::select_effect(13); // CYCLE_ALL
+            }
+            LA::RgbModeSwirl => {
+                let _ = via::select_effect(20); // CYCLE_SPIRAL
+            }
+            LA::RgbModeSnake => {
+                let _ = via::select_effect(14); // CYCLE_LEFT_RIGHT
+            }
+            LA::RgbModeKnight => {
+                let _ = via::select_effect(19); // CYCLE_PINWHEEL
+            }
+            LA::RgbModeXmas => {
+                let _ = via::select_effect(22); // RAINBOW_BEACON
+            }
+            LA::RgbModeGradient => {
+                let _ = via::select_effect(4); // GRADIENT_UP_DOWN
+            }
+            LA::RgbModeRgbtest => {
+                let _ = via::select_effect(2); // no test mode; solid colour
+            }
+            LA::RgbModeTwinkle => {
+                let _ = via::select_effect(24); // RAINDROPS
+            }
+
+            // ---- Backlight: no hardware on this board ----
+            LA::BacklightOn
+            | LA::BacklightOff
+            | LA::BacklightToggle
+            | LA::BacklightDown
+            | LA::BacklightUp
+            | LA::BacklightStep
+            | LA::BacklightToggleBreathing => {
+                debug!("Backlight keycode {:?} ignored: this board has no backlight", light_action)
+            }
+
+            // `LightAction` is `#[non_exhaustive]`.
+            _ => debug!("Unhandled light action: {:?}", light_action),
+        }
+    }
+
+    /// Without the RGB feature the keycodes are accepted but do nothing, which
+    /// is the behaviour a keymap ported from another firmware expects when the
+    /// feature is compiled out.
+    #[cfg(not(feature = "rgb"))]
+    fn process_action_light(&mut self, light_action: LightAction, _event: KeyboardEvent) {
+        warn!("Light control is not supported: {:?}", light_action);
+    }
+
+    async fn process_action_keyboard_control(&mut self, keyboard_control: KeyboardAction, event: KeyboardEvent) {        match keyboard_control {
             KeyboardAction::CapsWordToggle => {
                 // Handle Caps Word
                 if event.pressed {

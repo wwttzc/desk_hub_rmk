@@ -82,6 +82,20 @@ impl Default for RgbConfig {
 }
 
 impl RgbConfig {
+    /// A `const`-constructible default, for a `static` initialiser.
+    ///
+    /// [`Default`] cannot be used in a `static`, and the shared state needs a
+    /// starting value before the board's brightness ceiling is known.
+    pub const fn new_const() -> Self {
+        Self {
+            enable: DEFAULT_ON,
+            mode: super::registry::EFFECT_FIRST,
+            hsv: Hsv::new(DEFAULT_HUE, DEFAULT_SAT, MAX_BRIGHTNESS_CEILING),
+            speed: DEFAULT_SPD,
+            flags: DEFAULT_FLAGS,
+        }
+    }
+
     /// The `RGB_MATRIX_DEFAULT_*` set, as `eeconfig_update_rgb_matrix_default`
     /// writes it.
     ///

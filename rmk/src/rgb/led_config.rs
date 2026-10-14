@@ -167,6 +167,41 @@ impl<const LED_COUNT: usize> LedConfig<LED_COUNT> {
     }
 }
 
+/// One LED's description, flattened so it can be stored outside a const-generic
+/// array.
+///
+/// [`LedConfig`] carries a const-generic length and therefore cannot live in a
+/// `static` without knowing the board's LED count. This is the plain-value form
+/// the shared global keeps, and it is also what `GET_LED_INFO` reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct LedInfo {
+    pub point: LedPoint,
+    pub flags: u8,
+    /// `(row, col)`, or `None` when no key sits under the LED.
+    pub matrix_pos: Option<(u8, u8)>,
+}
+
+impl LedInfo {
+    /// A blank entry, for a table's unused tail.
+    pub const EMPTY: Self = Self {
+        point: LedPoint { x: 0, y: 0 },
+        flags: LED_FLAG_NONE,
+        matrix_pos: None,
+    };
+}
+
+impl<const LED_COUNT: usize> LedConfig<LED_COUNT> {
+    /// Flatten LED `index` into a [`LedInfo`].
+    pub fn info(&self, index: usize) -> LedInfo {
+        LedInfo {
+            point: self.points[index],
+            flags: self.flags[index],
+            matrix_pos: self.matrix_pos(index),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

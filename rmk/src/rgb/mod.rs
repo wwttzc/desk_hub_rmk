@@ -18,6 +18,9 @@
 //! - [`registry`] — the effect table: ids, names, config keys and dispatch.
 //! - [`engine`] — the task that renders frames and drives a LED driver.
 //! - [`vialrgb`] — the VialRGB wire protocol: framing, decoding and encoding.
+//! - [`shared`] — the state the protocol and the engine both reach.
+//! - [`via`] — the VIA command handlers that connect the two.
+//! - [`storage`] — persistence for the VIA `CustomSave` (0x09) path.
 
 pub mod effects;
 pub mod engine;
@@ -26,5 +29,9 @@ pub mod hit_tracker;
 pub mod led_config;
 pub mod registry;
 pub mod runner;
+pub mod shared;
 pub mod state;
+#[cfg(feature = "storage")]
+pub mod storage;
+pub mod via;
 pub mod vialrgb;

@@ -157,6 +157,13 @@ pub(crate) enum StorageKey {
     BondInfo(u8),
     /// A slot the board defines, see [`store_user_data`].
     UserData(u8),
+    /// The RGB Matrix configuration, saved by Vial's `CustomSave` (0x09).
+    ///
+    /// Appended rather than inserted: postcard tags are declaration positions,
+    /// so a new variant must go at the end or storage written by an older
+    /// firmware decodes as the wrong variant. See `storage_variant_order_is_pinned`.
+    #[cfg(feature = "rgb")]
+    RgbConfig,
 }
 
 /// A Storage item is actually a storage (key, value) pair.
@@ -211,6 +218,9 @@ pub(crate) enum StorageItem {
         slot: u8,
         data: heapless::Vec<u8, USER_DATA_MAX_SIZE>,
     },
+    /// The RGB Matrix configuration, as Vial left it.
+    #[cfg(feature = "rgb")]
+    RgbConfig(crate::rgb::state::RgbConfig),
 }
 
 impl StorageItem {
@@ -247,6 +257,8 @@ impl StorageItem {
             #[cfg(feature = "_ble")]
             Self::ActiveBleProfile(v) => (StorageKey::ActiveBleProfile, StorageValue::ActiveBleProfile(v)),
             Self::UserData { slot, data } => (StorageKey::UserData(slot), StorageValue::UserData(data)),
+            #[cfg(feature = "rgb")]
+            Self::RgbConfig(v) => (StorageKey::RgbConfig, StorageValue::RgbConfig(v)),
         }
     }
 }
@@ -296,6 +308,9 @@ pub(crate) enum StorageValue {
     #[cfg(feature = "_ble")]
     ActiveBleProfile(u8),
     UserData(heapless::Vec<u8, USER_DATA_MAX_SIZE>),
+    /// The RGB Matrix configuration, as Vial left it.
+    #[cfg(feature = "rgb")]
+    RgbConfig(crate::rgb::state::RgbConfig),
 }
 
 impl<'a> PostcardValue<'a> for StorageValue {}
@@ -1015,6 +1030,9 @@ mod tests {
             StorageKey::ActiveBleProfile,
             #[cfg(feature = "_ble")]
             StorageKey::BondInfo(10),
+            StorageKey::UserData(11),
+            #[cfg(feature = "rgb")]
+            StorageKey::RgbConfig,
         ];
         let mut buffer = [0u8; 64];
         for (tag, key) in keys.iter().enumerate() {
@@ -1047,6 +1065,9 @@ mod tests {
             StorageValue::BondInfo(ProfileInfo::default()),
             #[cfg(feature = "_ble")]
             StorageValue::ActiveBleProfile(0),
+            StorageValue::UserData(heapless::Vec::new()),
+            #[cfg(feature = "rgb")]
+            StorageValue::RgbConfig(crate::rgb::state::RgbConfig::new_const()),
         ];
         let mut buffer = [0u8; BUFFER_SIZE];
         for (tag, item) in data.iter().enumerate() {
