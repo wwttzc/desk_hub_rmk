@@ -149,6 +149,21 @@ pub struct RgbEngine<const LED_COUNT: usize, F: FrameBuffer> {
     rng: Rng,
     /// `RAINDROPS`'s `static uint16_t index`.
     raindrops_index: u16,
+    /// `PIXEL_RAIN`'s `static uint32_t wait_timer`: when its next repaint is due.
+    ///
+    /// QMK keeps this inside the effect; the engine is where cross-frame effect
+    /// state lives here, because the effect itself is a free function.
+    pixel_rain_wait: u32,
+    /// `g_rgb_frame_buffer`: per-matrix-cell state for the two framebuffer
+    /// effects. QMK guards it behind `RGB_MATRIX_FRAMEBUFFER_EFFECTS`; the rows
+    /// and columns are the board's electrical matrix, taken from `keyboard.toml`.
+    frame_buf: super::effects::impls::MatrixFrame<6, 4>,
+    /// `DIGITAL_RAIN`'s `static uint8_t drop`.
+    digital_rain_drop: u8,
+    /// `PIXEL_FRACTAL`'s `static bool led[MATRIX_ROWS][MID_COL]`.
+    fractal: super::effects::impls::FractalBits,
+    /// `PIXEL_FRACTAL`'s `static uint32_t wait_timer`.
+    fractal_wait: u32,
     /// `g_direct_mode_colors`: per-LED colours the host set directly.
     direct: super::vialrgb::DirectColors<LED_COUNT>,
     frame: F,
@@ -181,6 +196,11 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
             hits: HitTracker::new(),
             rng: Rng::new(),
             raindrops_index: u16::MAX,
+            pixel_rain_wait: 0,
+            frame_buf: super::effects::impls::MatrixFrame::new(),
+            digital_rain_drop: 0,
+            fractal: super::effects::impls::FractalBits::new(),
+            fractal_wait: 0,
             direct: super::vialrgb::DirectColors::new(),
             frame,
             ctx: FrameContext::default(),
@@ -282,9 +302,16 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
     /// This is QMK's `rgb_matrix_handle_key_event`. `pressed` selects which
     /// transitions count: `RGB_MATRIX_KEYRELEASES` is off by default, so a hit
     /// is recorded on key-down.
+    ///
+    /// The heat map is warmed here too, because a press is the only moment the
+    /// electrical position is known — the effect itself only ever sees the LED
+    /// chain. It is warmed unconditionally rather than only while
+    /// `TYPING_HEATMAP` is selected, which is what lets heat accumulate from
+    /// presses that happen just before the effect is chosen.
     pub fn handle_key_event(&mut self, row: u8, col: u8, pressed: bool) {
         if pressed {
             self.hits.record(self.leds, row, col);
+            super::effects::impls::typing_heatmap_record(&mut self.frame_buf, row, col);
         }
     }
 
@@ -403,6 +430,11 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
             hits,
             rng,
             raindrops_index,
+            pixel_rain_wait,
+            frame_buf,
+            digital_rain_drop,
+            fractal,
+            fractal_wait,
             frame,
             ctx,
             process_limit,
@@ -423,6 +455,11 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
                 hits,
                 rng,
                 raindrops_index,
+                pixel_rain_wait,
+                frame_buf,
+                digital_rain_drop,
+                fractal,
+                fractal_wait,
                 frame,
             );
 
@@ -742,8 +779,10 @@ mod tests {
     fn selectability_covers_off_and_the_table() {
         assert!(is_selectable(EFFECT_OFF));
         assert!(is_selectable(2));
-        assert!(is_selectable(51), "extension ids are selectable by keycode");
+        assert!(is_selectable(44), "the last VialRGB id is selectable");
         assert!(!is_selectable(super::super::registry::EFFECT_DIRECT), "not a QMK effect");
         assert!(!is_selectable(EFFECT_MAX));
+        // Effects only QMK has are not in the table, so nothing can select them.
+        assert!(!is_selectable(51), "RIVERFLOW is not part of this build");
     }
 }

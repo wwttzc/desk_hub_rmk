@@ -269,13 +269,13 @@ impl RgbMatrixConfig {
             }
             match resolve_effect_name(name) {
                 Some((id, true)) => enabled.push(id),
-                Some((_, false)) => warnings.push(format!(
-                    "rgb_matrix.animations.{name}: known effect, not implemented yet; \
+                // Every table entry is ported today, so this arm is what an
+                // entry added as `false` would fall into: a warning rather than
+                // a silent switch-on. It shares the warning shape with an
+                // unknown name because both mean "nothing will light for this".
+                Some((_, false)) | None => warnings.push(format!(
+                    "rgb_matrix.animations.{name}: no implemented effect by that name; \
                      it will not appear in Vial"
-                )),
-                None => warnings.push(format!(
-                    "rgb_matrix.animations.{name}: unknown effect name; \
-                     see rmk/src/rgb/registry.rs for the accepted keys"
                 )),
             }
         }
@@ -441,8 +441,10 @@ fn default_all_flags() -> u8 {
 /// The effect table, as `(id, implemented)` pairs.
 ///
 /// Duplicated from `rmk::rgb::registry` because `rmk-config` is a dependency of
-/// the macro crate and is compiled before the firmware crate exists. The two are
-/// kept in step by `rmk`'s registry tests, which assert the same ids.
+/// the macro crate and is compiled before the firmware crate exists — the two
+/// cannot share a constant, so they have to be kept in step by hand. The table
+/// holds VialRGB's 43 ids (`2..=44`) and nothing else; the test below pins those
+/// bounds so a dropped row is a failure rather than a silently disabled effect.
 fn rmk_effect_table() -> &'static [(u16, bool)] {
     &[
         (2, true),   // solid_color
@@ -459,42 +461,35 @@ fn rmk_effect_table() -> &'static [(u16, bool)] {
         (13, true),  // cycle_all
         (14, true),  // cycle_left_right
         (15, true),  // cycle_up_down
-        (16, false), // rainbow_moving_chevron
+        (16, true),  // rainbow_moving_chevron
         (17, true),  // cycle_out_in
-        (18, false), // cycle_out_in_dual
+        (18, true),  // cycle_out_in_dual
         (19, true),  // cycle_pinwheel
         (20, true),  // cycle_spiral
-        (21, false), // dual_beacon
+        (21, true),  // dual_beacon
         (22, true),  // rainbow_beacon
-        (23, false), // rainbow_pinwheels
+        (23, true),  // rainbow_pinwheels
         (24, true),  // raindrops
-        (25, false), // jellybean_raindrops
+        (25, true),  // jellybean_raindrops
         (26, true),  // hue_breathing
         (27, true),  // hue_pendulum
         (28, true),  // hue_wave
-        (29, false), // typing_heatmap
-        (30, false), // digital_rain
+        (29, true),  // typing_heatmap
+        (30, true),  // digital_rain
         (31, true),  // solid_reactive_simple
         (32, true),  // solid_reactive
-        (33, false), // solid_reactive_wide
-        (34, false), // solid_reactive_multiwide
-        (35, false), // solid_reactive_cross
-        (36, false), // solid_reactive_multicross
-        (37, false), // solid_reactive_nexus
-        (38, false), // solid_reactive_multinexus
-        (39, false), // splash
-        (40, false), // multisplash
-        (41, false), // solid_splash
-        (42, false), // solid_multisplash
-        (43, false), // pixel_rain
-        (44, false), // pixel_fractal
-        (45, false), // flower_blooming
-        (46, false), // pixel_flow
-        (47, false), // starlight_smooth
-        (48, false), // starlight
-        (49, false), // starlight_dual_sat
-        (50, false), // starlight_dual_hue
-        (51, true),  // riverflow
+        (33, true),  // solid_reactive_wide
+        (34, true),  // solid_reactive_multiwide
+        (35, true),  // solid_reactive_cross
+        (36, true),  // solid_reactive_multicross
+        (37, true),  // solid_reactive_nexus
+        (38, true),  // solid_reactive_multinexus
+        (39, true),  // splash
+        (40, true),  // multisplash
+        (41, true),  // solid_splash
+        (42, true),  // solid_multisplash
+        (43, true),  // pixel_rain
+        (44, true),  // pixel_fractal
     ]
 }
 
@@ -549,13 +544,6 @@ pub fn resolve_effect_name(name: &str) -> Option<(u16, bool)> {
         ("solid_multisplash", 42),
         ("pixel_rain", 43),
         ("pixel_fractal", 44),
-        ("flower_blooming", 45),
-        ("pixel_flow", 46),
-        ("starlight_smooth", 47),
-        ("starlight", 48),
-        ("starlight_dual_sat", 49),
-        ("starlight_dual_hue", 50),
-        ("riverflow", 51),
     ];
     let id = keys.iter().find(|(k, _)| *k == lower).map(|(_, id)| *id)?;
     let implemented = rmk_effect_table().iter().find(|(i, _)| *i == id).map(|(_, im)| *im)?;
@@ -691,13 +679,25 @@ rgbw = false
     }
 
     #[test]
+    fn the_effect_table_covers_exactly_vialrgb_ids() {
+        let table = rmk_effect_table();
+        assert_eq!(table.len(), 43, "VialRGB defines 43 effects");
+        for (i, (id, _)) in table.iter().enumerate() {
+            assert_eq!(*id, 2 + i as u16, "ids are dense from 2");
+        }
+        assert_eq!(table.last().unwrap().0, 44, "the last VialRGB id");
+    }
+
+    #[test]
     fn an_empty_animations_table_enables_every_ported_effect() {
         let matrix = parse("[rgb_matrix]\n").unwrap().matrix();
         let (enabled, warnings) = matrix.resolve_animations();
         assert!(!enabled.is_empty());
         assert!(enabled.contains(&2), "solid_color is ported");
-        assert!(enabled.contains(&51), "riverflow is ported");
-        assert!(!enabled.contains(&16), "rainbow_moving_chevron is not");
+        assert!(enabled.contains(&16), "rainbow_moving_chevron is ported");
+        assert!(enabled.contains(&29), "typing_heatmap is ported");
+        assert!(!enabled.contains(&51), "id 51 is not an effect in this build");
+        assert_eq!(enabled.len(), 43, "every VialRGB effect is enabled");
         assert!(warnings.is_empty(), "nothing to warn about");
         // Sorted and deduplicated, because Vial pages through this list.
         let mut sorted = enabled.clone();
@@ -720,21 +720,24 @@ solid_color = false
         assert!(warnings.is_empty());
     }
 
-    /// A key naming an unported effect warns instead of failing, so the config
-    /// does not have to change as effects land.
+    /// A key naming an effect that does not exist warns instead of failing, so a
+    /// config written against a newer Vial list still builds.
+    ///
+    /// Every VialRGB id is ported now, so the only way to reach this warning is
+    /// a name that was never in the table.
     #[test]
-    fn an_unported_effect_warns_and_is_skipped() {
+    fn an_unknown_effect_warns_and_is_skipped() {
         let text = r#"
 [rgb_matrix]
 [rgb_matrix.animations]
-starlight = true
+not_a_real_effect = true
 breathing = true
 "#;
         let matrix = parse(text).unwrap().matrix();
         let (enabled, warnings) = matrix.resolve_animations();
-        assert_eq!(enabled, vec![6], "starlight is skipped");
+        assert_eq!(enabled, vec![6], "the unknown name is skipped");
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("starlight"), "{warnings:?}");
+        assert!(warnings[0].contains("no implemented effect"), "{warnings:?}");
     }
 
     #[test]
@@ -769,7 +772,6 @@ BREATHING = true
         let text = r#"
 [rgb_matrix]
 [rgb_matrix.animations]
-starlight = false
 not_a_real_effect = false
 breathing = true
 "#;

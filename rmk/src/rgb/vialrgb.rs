@@ -529,7 +529,8 @@ mod tests {
             seen.extend(page);
         }
 
-        // RIVERFLOW (51) is an extension id and must never be reported.
+        // Nothing above the last VialRGB id can be reported, even if a
+        // hand-edited enabled list names one.
         assert_eq!(seen, vec![2, 6, 13, 24, 31, 32]);
         assert!(!seen.contains(&51));
     }
@@ -544,14 +545,21 @@ mod tests {
         assert_eq!(&args[4..], &[0xFF, 0xFF, 0xFF, 0xFF], "padding is 0xFF");
     }
 
+    /// An enabled id with no registry entry is not reported: the host asked for
+    /// VialRGB ids and an unknown number would make it select the wrong effect.
+    /// Nothing outside the registry can be enabled anyway — the build-time check
+    /// rejects it — so this guards the paging path against a hand-edited list.
     #[test]
-    fn supported_never_reports_an_extension_id() {
-        // A build where only RIVERFLOW (51) is ported reports nothing to Vial.
+    fn supported_never_reports_an_id_outside_the_registry() {
         let mut args = [0u8; REPORT_SIZE - 2];
-        assert_eq!(supported_page(0, &[51], &mut args), 0);
+        assert_eq!(supported_page(0, &[51], &mut args), 0, "51 has no entry");
         assert!(args.iter().all(|b| *b == 0xFF));
-        // Sanity: the filter bounds are the ones under test.
-        assert!(registry::VIALRGB_LAST < 51);
+
+        // A real id in the same list is still reported, so the filter is not
+        // simply rejecting everything.
+        let mut args = [0u8; REPORT_SIZE - 2];
+        assert_eq!(supported_page(0, &[51, 6], &mut args), 1);
+        assert_eq!(u16::from_le_bytes([args[0], args[1]]), 6);
     }
 
     #[test]

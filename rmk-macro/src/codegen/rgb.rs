@@ -458,26 +458,6 @@ pin = "GPIO48"
     }
 
     #[test]
-    fn an_unported_default_animation_falls_back_to_the_first_effect() {
-        let config: RgbTomlConfig = RgbTomlConfig::from_str(
-            r#"
-[rgb_matrix]
-[rgb_matrix.default]
-animation = "starlight"
-[[rgb_matrix.layout]]
-x = 0
-y = 0
-[ws2812]
-pin = "GPIO48"
-"#,
-        )
-        .unwrap();
-        let expansion = expand_rgb_config(Some(&config), &esp32s3()).unwrap();
-        // The mode must not name an effect that renders nothing.
-        assert!(expansion.definitions.to_string().contains("EFFECT_FIRST"));
-    }
-
-    #[test]
     fn an_unknown_default_animation_falls_back_too() {
         let config: RgbTomlConfig = RgbTomlConfig::from_str(
             r#"
@@ -496,13 +476,15 @@ pin = "GPIO48"
         assert!(expansion.definitions.to_string().contains("EFFECT_FIRST"));
     }
 
+    /// Every VialRGB effect is ported, so the only animations that warn are
+    /// names that were never in the table.
     #[test]
-    fn an_unported_animation_warns() {
+    fn an_unknown_animation_warns() {
         let config: RgbTomlConfig = RgbTomlConfig::from_str(
             r#"
 [rgb_matrix]
 [rgb_matrix.animations]
-starlight = true
+not_a_real_effect = true
 breathing = true
 [[rgb_matrix.layout]]
 x = 0
@@ -514,7 +496,11 @@ pin = "GPIO48"
         .unwrap();
         let expansion = expand_rgb_config(Some(&config), &esp32s3()).unwrap();
         assert_eq!(expansion.warnings.len(), 1);
-        assert!(expansion.warnings[0].contains("starlight"), "{:?}", expansion.warnings);
+        assert!(
+            expansion.warnings[0].contains("not_a_real_effect"),
+            "{:?}",
+            expansion.warnings
+        );
     }
 
     #[test]
@@ -523,7 +509,7 @@ pin = "GPIO48"
             r#"
 [rgb_matrix]
 [rgb_matrix.animations]
-starlight = true
+not_a_real_effect = true
 [[rgb_matrix.layout]]
 x = 0
 y = 0

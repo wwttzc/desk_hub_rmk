@@ -1,29 +1,24 @@
 //! The effect registry: which effects exist, what id each has, and how a batch
 //! is dispatched to one.
 //!
-//! # One numbering, not two
+//! # One numbering, and it is VialRGB's
 //!
-//! QMK has two effect numberings, and they do not agree:
+//! QMK has two effect numberings, and they do not agree: `enum
+//! rgb_matrix_effects`, whose order is `rgb_matrix_effects.inc` and which
+//! `rgb_config_t::mode` stores, and VialRGB's own list, whose ids travel over
+//! the wire. Mapping between them is not arithmetic.
 //!
-//! - `enum rgb_matrix_effects`, whose order is `animations/rgb_matrix_effects.inc`
-//!   and which `rgb_config_t::mode` stores.
-//! - VialRGB's `vialrgb_effects.inc`, whose ids travel over the wire, prefixed by
-//!   `OFF = 0` and `DIRECT = 1`.
+//! This firmware carries only the effects both sides have, so it keeps only one
+//! table: [`EFFECTS`] is VialRGB's list verbatim. A stored id and a wire id are
+//! the same number, and there is no cross table to transpose — which is what
+//! made "Vial picks effect A, the keyboard lights effect B" impossible.
 //!
-//! Mapping between them is not arithmetic. `FLOWER_BLOOMING` and `PIXEL_FLOW`
-//! exist in QMK's enum but have no VialRGB id at all, while `PIXEL_RAIN` and
-//! `PIXEL_FRACTAL` sit mid-list in QMK and at the *end* of VialRGB's table.
-//! Keeping both numbers would mean a hand-maintained cross table where a single
-//! transposed row shows up as "Vial picks effect A, the keyboard lights effect B"
-//! — the hardest kind of bug to notice from the outside.
+//! - `2..=44` are exactly VialRGB's ids, in VialRGB's order.
+//! - `45` is one past the last of them, QMK's `RGB_MATRIX_EFFECT_MAX` role.
 //!
-//! So there is one numbering here, and it is VialRGB's:
-//!
-//! - `2..=44` are exactly VialRGB's ids, in VialRGB's order. A stored id and a
-//!   wire id are the same number.
-//! - `45..=51` are effects QMK has but VialRGB cannot name. They are reachable
-//!   by keycode and by `rgb.toml`, just not selectable from Vial's effect list —
-//!   which is also true of them upstream.
+//! Effects that only QMK has — `FLOWER_BLOOMING`, `PIXEL_FLOW`, the four
+//! `STARLIGHT`s and `RIVERFLOW` — are deliberately absent. Vial cannot select
+//! them, so implementing them would add code no host could reach.
 //!
 //! `OFF` (0) and `DIRECT` (1) stay reserved and are not registry entries: the
 //! first means "disabled", the second is the host driving per-LED colours
@@ -44,7 +39,7 @@ pub const EFFECT_FIRST: u16 = 2;
 /// The last id VialRGB knows. Ids above it exist only in this firmware.
 pub const VIALRGB_LAST: u16 = 44;
 /// One past the last effect id, QMK's `RGB_MATRIX_EFFECT_MAX` role.
-pub const EFFECT_MAX: u16 = 52;
+pub const EFFECT_MAX: u16 = 45;
 
 /// One registry row.
 #[derive(Clone, Copy, Debug)]
@@ -68,7 +63,7 @@ pub struct EffectEntry {
 /// The `2..=44` block is `vialrgb_effects.inc` verbatim, so it can be diffed
 /// against upstream by eye. The block above it holds QMK effects VialRGB cannot
 /// select.
-pub const EFFECTS: [EffectEntry; 50] = [
+pub const EFFECTS: [EffectEntry; 43] = [
     // ---- VialRGB ids, in `vialrgb_effects.inc` order ----
     entry(2, "SOLID_COLOR", true),
     entry(3, "ALPHAS_MODS", true),
@@ -84,43 +79,35 @@ pub const EFFECTS: [EffectEntry; 50] = [
     entry(13, "CYCLE_ALL", true),
     entry(14, "CYCLE_LEFT_RIGHT", true),
     entry(15, "CYCLE_UP_DOWN", true),
-    entry(16, "RAINBOW_MOVING_CHEVRON", false),
+    entry(16, "RAINBOW_MOVING_CHEVRON", true),
     entry(17, "CYCLE_OUT_IN", true),
-    entry(18, "CYCLE_OUT_IN_DUAL", false),
+    entry(18, "CYCLE_OUT_IN_DUAL", true),
     entry(19, "CYCLE_PINWHEEL", true),
     entry(20, "CYCLE_SPIRAL", true),
-    entry(21, "DUAL_BEACON", false),
+    entry(21, "DUAL_BEACON", true),
     entry(22, "RAINBOW_BEACON", true),
-    entry(23, "RAINBOW_PINWHEELS", false),
+    entry(23, "RAINBOW_PINWHEELS", true),
     entry(24, "RAINDROPS", true),
-    entry(25, "JELLYBEAN_RAINDROPS", false),
+    entry(25, "JELLYBEAN_RAINDROPS", true),
     entry(26, "HUE_BREATHING", true),
     entry(27, "HUE_PENDULUM", true),
     entry(28, "HUE_WAVE", true),
-    entry(29, "TYPING_HEATMAP", false),
-    entry(30, "DIGITAL_RAIN", false),
+    entry(29, "TYPING_HEATMAP", true),
+    entry(30, "DIGITAL_RAIN", true),
     entry(31, "SOLID_REACTIVE_SIMPLE", true),
     entry(32, "SOLID_REACTIVE", true),
-    entry(33, "SOLID_REACTIVE_WIDE", false),
-    entry(34, "SOLID_REACTIVE_MULTIWIDE", false),
-    entry(35, "SOLID_REACTIVE_CROSS", false),
-    entry(36, "SOLID_REACTIVE_MULTICROSS", false),
-    entry(37, "SOLID_REACTIVE_NEXUS", false),
-    entry(38, "SOLID_REACTIVE_MULTINEXUS", false),
-    entry(39, "SPLASH", false),
-    entry(40, "MULTISPLASH", false),
-    entry(41, "SOLID_SPLASH", false),
-    entry(42, "SOLID_MULTISPLASH", false),
-    entry(43, "PIXEL_RAIN", false),
-    entry(44, "PIXEL_FRACTAL", false),
-    // ---- QMK effects with no VialRGB id, so extensions above VIALRGB_LAST ----
-    entry(45, "FLOWER_BLOOMING", false),
-    entry(46, "PIXEL_FLOW", false),
-    entry(47, "STARLIGHT_SMOOTH", false),
-    entry(48, "STARLIGHT", false),
-    entry(49, "STARLIGHT_DUAL_SAT", false),
-    entry(50, "STARLIGHT_DUAL_HUE", false),
-    entry(51, "RIVERFLOW", true),
+    entry(33, "SOLID_REACTIVE_WIDE", true),
+    entry(34, "SOLID_REACTIVE_MULTIWIDE", true),
+    entry(35, "SOLID_REACTIVE_CROSS", true),
+    entry(36, "SOLID_REACTIVE_MULTICROSS", true),
+    entry(37, "SOLID_REACTIVE_NEXUS", true),
+    entry(38, "SOLID_REACTIVE_MULTINEXUS", true),
+    entry(39, "SPLASH", true),
+    entry(40, "MULTISPLASH", true),
+    entry(41, "SOLID_SPLASH", true),
+    entry(42, "SOLID_MULTISPLASH", true),
+    entry(43, "PIXEL_RAIN", true),
+    entry(44, "PIXEL_FRACTAL", true),
 ];
 
 /// A table row, with the config key derived from the id.
@@ -185,13 +172,6 @@ const fn key_for(id: u16) -> &'static str {
         42 => "solid_multisplash",
         43 => "pixel_rain",
         44 => "pixel_fractal",
-        45 => "flower_blooming",
-        46 => "pixel_flow",
-        47 => "starlight_smooth",
-        48 => "starlight",
-        49 => "starlight_dual_sat",
-        50 => "starlight_dual_hue",
-        51 => "riverflow",
         _ => "unknown",
     }
 }
@@ -209,24 +189,18 @@ impl EffectEntry {
     pub fn by_key(key: &str) -> Option<&'static EffectEntry> {
         EFFECTS.iter().find(|e| e.key.eq_ignore_ascii_case(key))
     }
-
-    /// Whether Vial can select this effect by id.
-    pub const fn is_vialrgb(&self) -> bool {
-        self.id <= VIALRGB_LAST
-    }
 }
 
 /// The effect ids every enabled effect should report, ascending and above `gt`.
 ///
-/// Mirrors `get_supported()` in `vialrgb.c`. Extension ids above
-/// [`VIALRGB_LAST`] are withheld: a host asked for VialRGB ids and cannot
-/// interpret ours, so sending one would make it select the wrong effect.
+/// Mirrors `get_supported()` in `vialrgb.c`. Every id in [`EFFECTS`] is a
+/// VialRGB id by construction, so nothing has to be withheld here.
 ///
 /// Returns the number written into `out`.
 pub fn supported_ids(gt: u16, enabled: &[u16], out: &mut [u16]) -> usize {
     let mut count = 0;
     for entry in EFFECTS.iter() {
-        if entry.id > VIALRGB_LAST || entry.id <= gt || !is_enabled(entry.id, enabled) {
+        if entry.id <= gt || !is_enabled(entry.id, enabled) {
             continue;
         }
         if count == out.len() {
@@ -269,8 +243,14 @@ pub fn dispatch<const LED_COUNT: usize, F: LedFrame + FrameAll>(
     hits: &HitTracker,
     rng: &mut Rng,
     raindrops_index: &mut u16,
+    pixel_rain_wait: &mut u32,
+    frame_buf: &mut impls::MatrixFrame<6, 4>,
+    digital_rain_drop: &mut u8,
+    fractal: &mut impls::FractalBits,
+    fractal_wait: &mut u32,
     frame: &mut F,
 ) -> bool {
+    use crate::rgb::fx::math8::qsub8;
     use crate::rgb::runner as r;
     use impls::*;
 
@@ -305,25 +285,82 @@ pub fn dispatch<const LED_COUNT: usize, F: LedFrame + FrameAll>(
         19 => r::effect_runner_dx_dy(ctx, params, frame, cycle_pinwheel_math),
         20 => r::effect_runner_dx_dy_dist(ctx, params, frame, cycle_spiral_math),
 
+        16 => r::effect_runner_i(ctx, params, frame, |hsv, i, t| {
+            let p = ctx.leds.point(i as usize);
+            rainbow_moving_chevron_math(hsv, p.x, p.y, t, ctx.center.y)
+        }),
+
+        18 => r::effect_runner_dx_dy(ctx, params, frame, |hsv, dx, dy, t| {
+            cycle_out_in_dual_math(hsv, dx, dy, t, ctx.center.x)
+        }),
+
+        21 => r::effect_runner_sin_cos_i(ctx, params, frame, |hsv, cos, sin, i, _t| {
+            let p = ctx.leds.point(i as usize);
+            rainbow_beacon_math(hsv, cos, sin, p.x, p.y, ctx.center.x, ctx.center.y)
+        }),
+
         22 => r::effect_runner_sin_cos_i(ctx, params, frame, |hsv, cos, sin, i, _t| {
             let p = ctx.leds.point(i as usize);
             rainbow_beacon_math(hsv, cos, sin, p.x, p.y, ctx.center.x, ctx.center.y)
         }),
 
+        23 => r::effect_runner_sin_cos_i(ctx, params, frame, |hsv, cos, sin, i, _t| {
+            let p = ctx.leds.point(i as usize);
+            rainbow_pinwheels_math(hsv, cos, sin, p.x, p.y, ctx.center.x, ctx.center.y)
+        }),
+
         24 => raindrops(ctx, params, rng, raindrops_index, frame),
+
+        25 => jellybean_raindrops(ctx, params, rng, frame),
 
         26 => r::effect_runner_i(ctx, params, frame, hue_breathing_math),
         27 => r::effect_runner_i(ctx, params, frame, |hsv, i, t| hue_pendulum_math(hsv, x(i), t)),
         28 => r::effect_runner_i(ctx, params, frame, |hsv, i, t| hue_wave_math(hsv, x(i), t)),
 
+        // The two framebuffer effects walk the electrical matrix rather than the
+        // LED chain, so they read and write `frame_buf` instead of batching over
+        // LEDs. `TYPING_HEATMAP` still batches, cell by cell.
+        29 => typing_heatmap(ctx, params, frame_buf, frame),
+        30 => digital_rain(ctx, params, frame_buf, rng, digital_rain_drop, frame),
+
         31 => r::effect_runner_reactive(ctx, params, hits, frame, solid_reactive_simple_math),
         32 => r::effect_runner_reactive(ctx, params, hits, frame, solid_reactive_math),
 
-        // `RIVERFLOW_math` rebuilds its own phase from the raw timer rather than
-        // using the runner's `time`, so the runner's second argument is ignored.
-        51 => r::effect_runner_i(ctx, params, frame, |hsv, i, _t| {
-            riverflow_math(hsv, i, ctx.time, ctx.config.speed)
-        }),
+        // The splash family shares its runner and differs only in where the
+        // accumulation starts: `start = count - 1` keeps a single splash from
+        // the newest hit, while `0` sums every remembered hit.
+        39 => {
+            let start = qsub8(hits.count(), 1);
+            r::effect_runner_reactive_splash(start, ctx, params, hits, frame, splash_math)
+        }
+        40 => r::effect_runner_reactive_splash(0, ctx, params, hits, frame, splash_math),
+        41 => {
+            let start = qsub8(hits.count(), 1);
+            r::effect_runner_reactive_splash(start, ctx, params, hits, frame, solid_splash_math)
+        }
+        42 => r::effect_runner_reactive_splash(0, ctx, params, hits, frame, solid_splash_math),
+
+        // The same runner again, with the pulse shaped by the LED's offset from
+        // each hit rather than by the bare distance.
+        33 => {
+            let start = qsub8(hits.count(), 1);
+            r::effect_runner_reactive_splash(start, ctx, params, hits, frame, solid_reactive_wide_math)
+        }
+        34 => r::effect_runner_reactive_splash(0, ctx, params, hits, frame, solid_reactive_wide_math),
+        35 => {
+            let start = qsub8(hits.count(), 1);
+            r::effect_runner_reactive_splash(start, ctx, params, hits, frame, solid_reactive_cross_math)
+        }
+        36 => r::effect_runner_reactive_splash(0, ctx, params, hits, frame, solid_reactive_cross_math),
+        37 => {
+            let start = qsub8(hits.count(), 1);
+            r::effect_runner_reactive_splash(start, ctx, params, hits, frame, solid_reactive_nexus_math)
+        }
+        38 => r::effect_runner_reactive_splash(0, ctx, params, hits, frame, solid_reactive_nexus_math),
+
+        43 => pixel_rain(ctx, params, rng, pixel_rain_wait, frame),
+
+        44 => pixel_fractal(ctx, params, fractal, rng, fractal_wait, frame),
 
         // In the table but not ported yet. Keep the frame coherent; the
         // build-time check reports it.
@@ -406,32 +443,17 @@ mod tests {
         for (id, name) in expected {
             let entry = EffectEntry::by_id(id).unwrap_or_else(|| panic!("no entry for id {id}"));
             assert_eq!(entry.name, name, "VialRGB id {id}");
-            assert!(entry.is_vialrgb());
         }
         assert_eq!(expected.len(), (VIALRGB_LAST - EFFECT_FIRST + 1) as usize);
     }
 
-    /// Effects QMK has but VialRGB cannot name sit above the wire range, so no
-    /// host can accidentally select one by sending a number it means for
-    /// something else.
+    /// Every entry is a VialRGB id, so the table has no id a host cannot ask
+    /// for and no gap it would trip over while paging.
     #[test]
-    fn effects_without_a_vialrgb_id_are_the_extensions() {
-        let extensions: Vec<&str> = EFFECTS
-            .iter()
-            .filter(|e| !e.is_vialrgb())
-            .map(|e| e.name)
-            .collect();
-        assert_eq!(
-            extensions,
-            [
-                "FLOWER_BLOOMING",
-                "PIXEL_FLOW",
-                "STARLIGHT_SMOOTH",
-                "STARLIGHT",
-                "STARLIGHT_DUAL_SAT",
-                "STARLIGHT_DUAL_HUE",
-                "RIVERFLOW",
-            ]
+    fn every_entry_is_a_vialrgb_id_within_the_wire_range() {
+        assert!(
+            EFFECTS.iter().all(|e| e.id >= EFFECT_FIRST && e.id <= VIALRGB_LAST),
+            "an entry sits outside VialRGB's id range"
         );
     }
 
@@ -465,19 +487,18 @@ mod tests {
     }
 
     #[test]
-    fn supported_ids_skip_gt_filter_by_enabled_and_withhold_extensions() {
-        // Empty enabled list means "everything ported *and* reachable by id".
+    fn supported_ids_skip_gt_and_filter_by_enabled() {
         let mut out = [0u16; 64];
         let n = supported_ids(0, &[], &mut out);
         let expected: Vec<u16> = EFFECTS
             .iter()
-            .filter(|e| e.implemented && e.is_vialrgb())
+            .filter(|e| e.implemented)
             .map(|e| e.id)
             .collect();
         assert_eq!(&out[..n], &expected[..]);
         assert!(n > 0);
-        assert!(!out[..n].contains(&51), "RIVERFLOW is an extension id");
-        assert!(!out[..n].contains(&16), "RAINBOW_MOVING_CHEVRON is not ported");
+        // An id with no entry at all is not reported.
+        assert!(!out[..n].contains(&51));
 
         // `gt` drops everything at or below it.
         let mut out = [0u16; 64];
@@ -494,15 +515,15 @@ mod tests {
         let n = supported_ids(0, &[6], &mut out);
         assert_eq!(&out[..n], &[6]);
 
-        // An enabled effect that is not implemented still has an id to report:
-        // rejecting it is the build-time check's job, not this function's.
+        // An enabled effect that is not implemented yet still has an id to
+        // report: rejecting it is the build-time check's job, not this one's.
         let mut out = [0u16; 64];
-        let n = supported_ids(0, &[16], &mut out);
-        assert_eq!(&out[..n], &[16]);
+        let n = supported_ids(0, &[25], &mut out);
+        assert_eq!(&out[..n], &[25]);
 
-        // An extension id is never reported, enabled or not.
+        // An id with no entry at all is never reported, enabled or not.
         let mut out = [0u16; 64];
-        assert_eq!(supported_ids(0, &[51], &mut out), 0, "RIVERFLOW has no VialRGB id");
+        assert_eq!(supported_ids(0, &[51], &mut out), 0, "51 is not an effect here");
     }
 
     #[test]
@@ -512,13 +533,37 @@ mod tests {
         assert_eq!(out, [2, 3, 4]);
     }
 
+    /// The end state of the port: every id Vial can ask for is implemented, so
+    /// an unconfigured build reports the whole table and `supported_ids` has
+    /// nothing to withhold.
+    #[test]
+    fn every_vialrgb_effect_is_implemented() {
+        assert_eq!(EFFECTS.len(), 43, "VialRGB defines 43 effects");
+        let missing: Vec<&str> = EFFECTS
+            .iter()
+            .filter(|e| !e.implemented)
+            .map(|e| e.name)
+            .collect();
+        assert!(missing.is_empty(), "not ported yet: {missing:?}");
+
+        let mut out = [0u16; 64];
+        let n = supported_ids(0, &[], &mut out);
+        assert_eq!(n, EFFECTS.len(), "every id is reported");
+    }
+
     #[test]
     fn is_enabled_defaults_to_implemented() {
-        assert!(is_enabled(2, &[]), "SOLID_COLOR is ported");
-        assert!(!is_enabled(16, &[]), "RAINBOW_MOVING_CHEVRON is not");
-        assert!(is_enabled(51, &[]), "RIVERFLOW is ported");
-        assert!(is_enabled(16, &[16]));
-        assert!(!is_enabled(2, &[16]));
+        // Every table entry is ported, so the default build enables all of them.
+        for entry in EFFECTS.iter() {
+            assert!(is_enabled(entry.id, &[]), "{} is ported", entry.name);
+        }
+        // An id with no entry is never on, however it is spelled.
+        assert!(!is_enabled(51, &[]), "RIVERFLOW is not in this build");
+        assert!(!is_enabled(0, &[]), "OFF is not an effect");
+
+        // An explicit set still narrows the choice.
+        assert!(is_enabled(6, &[6]));
+        assert!(!is_enabled(2, &[6]));
     }
 
     /// Every id in the table must dispatch without panicking, batched or not,
@@ -556,6 +601,11 @@ mod tests {
                 for entry in EFFECTS.iter() {
                     let mut rng = Rng::with_seed(1337);
                     let mut raindrops_index = u16::MAX;
+                    let mut pixel_rain_wait = 0u32;
+                    let mut frame_buf = impls::MatrixFrame::<6, 4>::new();
+                    let mut digital_rain_drop = 0u8;
+                    let mut fractal = impls::FractalBits::new();
+                    let mut fractal_wait = 0u32;
                     let mut frame = ArrayFrame::<N>::new();
 
                     // Walk the batches exactly as the engine will.
@@ -574,6 +624,11 @@ mod tests {
                             &hits,
                             &mut rng,
                             &mut raindrops_index,
+                            &mut pixel_rain_wait,
+                            &mut frame_buf,
+                            &mut digital_rain_drop,
+                            &mut fractal,
+                            &mut fractal_wait,
                             &mut frame,
                         );
                         guard += 1;
@@ -616,6 +671,11 @@ mod tests {
         let hits = HitTracker::new();
         let mut rng = Rng::with_seed(1);
         let mut index = u16::MAX;
+        let mut wait = 0u32;
+        let mut frame_buf = impls::MatrixFrame::<6, 4>::new();
+        let mut drop = 0u8;
+        let mut fractal = impls::FractalBits::new();
+        let mut fractal_wait = 0u32;
         let mut frame = ArrayFrame::<2>::new();
         frame.fill(Rgb::WHITE);
 
@@ -624,7 +684,20 @@ mod tests {
             flags: ALL_FLAGS,
             init: true,
         };
-        assert!(!dispatch(0, &ctx, &params, &hits, &mut rng, &mut index, &mut frame));
+        assert!(!dispatch(
+            0,
+            &ctx,
+            &params,
+            &hits,
+            &mut rng,
+            &mut index,
+            &mut wait,
+            &mut frame_buf,
+            &mut drop,
+            &mut fractal,
+            &mut fractal_wait,
+            &mut frame
+        ));
         assert_eq!(frame.pixels, [Rgb::BLACK; 2]);
     }
 }

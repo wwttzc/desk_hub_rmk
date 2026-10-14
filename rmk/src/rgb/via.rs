@@ -427,7 +427,7 @@ mod tests {
         get[3] = 0;
         assert_eq!(handle_get(&mut get), Outcome::Handled);
 
-        // RIVERFLOW (51) has no VialRGB id and must not appear.
+        // 51 is not an effect in this build, so it must not appear.
         let ids: Vec<u16> = (0..8)
             .map(|i| u16::from_le_bytes([get[2 + i * 2], get[3 + i * 2]]))
             .take_while(|id| *id != 0xFFFF)
