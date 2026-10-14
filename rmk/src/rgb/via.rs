@@ -192,6 +192,19 @@ pub const SUB_SET_MODE: u8 = VIALRGB_SET_MODE;
 /// `DIRECT_FASTSET`'s capacity, for the caller's bounds check.
 pub const SUB_DIRECT_LEDS_PER_REPORT: usize = DIRECT_LEDS_PER_REPORT;
 
+/// Record a key press for the reactive effects and the heat map.
+///
+/// This is QMK's `process_rgb_matrix` body, called from the keyboard task's key
+/// path rather than from the RGB task: that task owns the engine, so it is the
+/// only place that could record a press, and putting the recording here is what
+/// lets the engine's run loop stay untouched.
+///
+/// The caller passes an electrical position; a position with no LED under it is
+/// ignored down in [`shared`].
+pub fn record_key_event(row: u8, col: u8) {
+    shared::with_state(|s| s.record_key_press(row, col));
+}
+
 /// Apply an HSV from a keycode handler, clamping to the ceiling.
 pub fn set_hsv_from_keycode(hsv: Hsv) -> bool {
     shared::with_state(|s| s.set_hsv(hsv))

@@ -58,6 +58,13 @@ pub struct EffectEntry {
     pub implemented: bool,
 }
 
+/// `TYPING_HEATMAP`'s id.
+///
+/// The table below is still the single source of truth for ids; this just gives
+/// the one effect that is selected *by id* outside the dispatch path — the
+/// keyboard task warms its heat map only while it is active — a readable name.
+pub const TYPING_HEATMAP: u16 = 29;
+
 /// The effect table, ordered by id.
 ///
 /// The `2..=44` block is `vialrgb_effects.inc` verbatim, so it can be diffed

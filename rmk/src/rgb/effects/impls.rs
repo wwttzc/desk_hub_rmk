@@ -580,6 +580,18 @@ impl<const ROWS: usize, const COLS: usize> MatrixFrame<ROWS, COLS> {
     pub fn clear(&mut self) {
         self.cells = [[0; COLS]; ROWS];
     }
+
+    /// The raw grid, for copying the state across a shared-state boundary.
+    #[inline]
+    pub const fn cells(&self) -> &[[u8; COLS]; ROWS] {
+        &self.cells
+    }
+
+    /// Replace the grid wholesale, the receiving half of [`Self::cells`].
+    #[inline]
+    pub fn set_cells(&mut self, cells: &[[u8; COLS]; ROWS]) {
+        self.cells = *cells;
+    }
 }
 
 impl<const ROWS: usize, const COLS: usize> Default for MatrixFrame<ROWS, COLS> {
@@ -660,6 +672,10 @@ pub fn typing_heatmap<const LED_COUNT: usize, F: LedFrame>(
 
     if params.init {
         frame_buf.clear();
+        // The keyboard task is the only writer of the heat, and it holds its own
+        // copy; clearing only this one would let the next frame's snapshot copy
+        // every leftover temperature back in.
+        crate::rgb::shared::clear_heat();
         for i in 0..LED_COUNT {
             frame.set_color(i, Rgb::BLACK);
         }

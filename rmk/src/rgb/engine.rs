@@ -297,21 +297,16 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
         &self.frame
     }
 
-    /// Feed a key event to the hit tracker.
+    /// Record a key press straight into this engine's tracker.
     ///
-    /// This is QMK's `rgb_matrix_handle_key_event`. `pressed` selects which
-    /// transitions count: `RGB_MATRIX_KEYRELEASES` is off by default, so a hit
-    /// is recorded on key-down.
-    ///
-    /// The heat map is warmed here too, because a press is the only moment the
-    /// electrical position is known — the effect itself only ever sees the LED
-    /// chain. It is warmed unconditionally rather than only while
-    /// `TYPING_HEATMAP` is selected, which is what lets heat accumulate from
-    /// presses that happen just before the effect is chosen.
+    /// Production does not come through here: the keyboard task records into
+    /// [`super::shared`] and the engine takes a snapshot each frame (see
+    /// [`Self::advance_time`]), because the engine runs in its own task and the
+    /// key path cannot reach it. This entry point stays for tests, which drive
+    /// one engine directly.
     pub fn handle_key_event(&mut self, row: u8, col: u8, pressed: bool) {
         if pressed {
             self.hits.record(self.leds, row, col);
-            super::effects::impls::typing_heatmap_record(&mut self.frame_buf, row, col);
         }
     }
 
@@ -319,10 +314,44 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
     ///
     /// The caller passes how long since the last call, because the engine does
     /// not own a clock.
+    ///
+    /// This is also the frame boundary QMK's `rgb_task_start` marks: the presses
+    /// the keyboard task has recorded since the last call are taken as a
+    /// snapshot and handed to the effect state.
     pub fn advance_time(&mut self, now_ms: u32) {
         let delta = now_ms.wrapping_sub(self.timer_ms);
         self.timer_ms = now_ms;
+        self.sync_from_shared();
         self.hits.age(delta);
+    }
+
+    /// Take the keyboard task's presses, and the heat map's grid, from [`super::shared`].
+    ///
+    /// Both only move when the engine has actually been installed by the
+    /// generated board code: before that `shared` holds no LED table and no mode,
+    /// and a test driving one engine directly must keep the hits it recorded
+    /// itself.
+    fn sync_from_shared(&mut self) {
+        if !super::shared::is_ready() {
+            return;
+        }
+        let mode = super::shared::config_snapshot().mode();
+        let pending = super::shared::with_state(|s| {
+            let hits = s.pending_hits();
+            let mut scratch = [super::shared::PendingHit::default(); super::shared::PENDING_HITS];
+            let n = hits.len().min(scratch.len());
+            scratch[..n].copy_from_slice(&hits[..n]);
+            s.take_pending_hits();
+            (scratch, n)
+        });
+        self.hits.sync_from(&pending.0[..pending.1]);
+
+        // The heat map is only read by the effect that owns it, so nothing is
+        // copied for the others.
+        if mode == registry::TYPING_HEATMAP {
+            let cells = super::shared::with_state(|s| *s.heat().cells());
+            self.frame_buf.set_cells(&cells);
+        }
     }
 
     /// The engine's current reading of `g_rgb_timer`.
@@ -593,6 +622,32 @@ mod tests {
             }
         }
         engine.frame.flushes - before
+    }
+
+    /// A press recorded by the keyboard task reaches this engine at the next
+    /// frame boundary.
+    ///
+    /// This is the whole point of the shared hand-off: the keyboard task cannot
+    /// touch the engine, which owns its tracker inside its own task, so the press
+    /// is left in shared state and picked up here.
+    #[test]
+    fn a_press_left_in_shared_state_reaches_the_tracker() {
+        use crate::rgb::via;
+
+        via::install(leds(), 255, &[]);
+        // `TYPING_HEATMAP` is not selected, so only the reactive buffer moves.
+        via::record_key_event(0, 1);
+
+        let mut engine = engine(RgbConfig::default());
+        engine.advance_time(1000);
+        assert_eq!(engine.hits.count(), 1, "the press was taken up");
+
+        // The pending buffer is drained, so the next frame sees nothing new.
+        engine.advance_time(1016);
+        assert_eq!(engine.hits.count(), 1, "not taken twice");
+
+        // Leave the global as the other tests expect to find it.
+        via::install(&crate::rgb::led_config::LedConfig::<0>::new([], [], []), 255, &[]);
     }
 
     #[test]

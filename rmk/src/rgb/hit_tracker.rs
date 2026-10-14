@@ -125,6 +125,29 @@ impl HitTracker {
         }
     }
 
+    /// Replace the buffer with a snapshot taken from the keyboard task.
+    ///
+    /// This is QMK's `g_last_hit_tracker = last_hit_buffer` at the top of a
+    /// frame: the presses recorded since the previous snapshot become the
+    /// tracker's contents, with a fresh `tick` so they start at full strength.
+    ///
+    /// A snapshot with entries replaces the buffer outright rather than merging:
+    /// the engine's own `age` has been ageing the previous generation all along,
+    /// and the keyboard side only ever hands over what is new.
+    pub fn sync_from(&mut self, hits: &[super::shared::PendingHit]) {
+        if hits.is_empty() {
+            return;
+        }
+        let count = hits.len().min(LED_HITS_TO_REMEMBER);
+        for (slot, hit) in hits[..count].iter().enumerate() {
+            self.x[slot] = hit.x;
+            self.y[slot] = hit.y;
+            self.index[slot] = hit.index;
+            self.tick[slot] = 0;
+        }
+        self.count = count as u8;
+    }
+
     /// `rgb_task_timers`' ageing: add `delta_ms` to every remembered hit.
     ///
     /// Ported as-is, including its quirk: the loop bound is a snapshot of

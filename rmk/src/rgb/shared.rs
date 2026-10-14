@@ -62,6 +62,97 @@ pub struct SharedRgbState {
     /// Whether the host has written a pixel since boot, `g_direct_mode_colors`
     /// being valid at all.
     direct_active: bool,
+    /// QMK's `last_hit_buffer`: presses the keyboard task has recorded but the
+    /// engine has not yet taken a snapshot of.
+    ///
+    /// The recording side is the key-processing path, which runs in the keyboard
+    /// task and cannot reach the engine; the engine is what renders from the
+    /// result. A pending buffer plus a swap at the frame boundary is what keeps
+    /// the two apart, exactly as QMK's `last_hit_buffer` /
+    /// `g_last_hit_tracker` pair does.
+    pending_hits: PendingHits,
+    /// QMK's `rgb_frame_buffer` for `TYPING_HEATMAP`: one temperature per matrix
+    /// cell, warmed by the keyboard task and cooled by the effect.
+    heat: super::effects::impls::MatrixFrame<6, 4>,
+    /// Counts presses that arrived with no room left in `pending_hits`.
+    ///
+    /// QMK loses them silently; counting is what makes the loss visible instead
+    /// of a reactive effect that mysteriously drops every so often.
+    dropped_hits: u16,
+}
+
+/// The matrix grid the heat map and the digital rain index by.
+///
+/// The board is a 6x4 electrical matrix; both effects walk it rather than the
+/// LED chain, so the dimensions are part of the shared state rather than derived
+/// from `LED_COUNT`.
+pub const MATRIX_ROWS: usize = 6;
+/// Columns of the electrical matrix; see [`MATRIX_ROWS`].
+pub const MATRIX_COLS: usize = 4;
+
+/// How many presses may pile up between two engine snapshots.
+///
+/// QMK holds `LED_HITS_TO_REMEMBER` (8); the same bound is used here so the
+/// engine's tracker can be replaced wholesale by a snapshot.
+pub const PENDING_HITS: usize = 8;
+
+/// One recorded press, in the form the engine's tracker wants.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PendingHit {
+    pub x: u8,
+    pub y: u8,
+    pub index: u8,
+}
+
+/// QMK's `last_hit_buffer`.
+#[derive(Clone, Copy, Debug)]
+pub struct PendingHits {
+    entries: [PendingHit; PENDING_HITS],
+    count: u8,
+}
+
+impl PendingHits {
+    const fn new() -> Self {
+        Self {
+            entries: [PendingHit {
+                x: 0,
+                y: 0,
+                index: 0,
+            }; PENDING_HITS],
+            count: 0,
+        }
+    }
+
+    /// The live prefix.
+    #[inline]
+    pub fn entries(&self) -> &[PendingHit] {
+        &self.entries[..self.count as usize]
+    }
+
+    /// Append one press, dropping the oldest when full.
+    ///
+    /// Returns whether anything had to be dropped, so the caller can count it.
+    fn push(&mut self, hit: PendingHit) -> bool {
+        let mut dropped = false;
+        if self.count as usize == PENDING_HITS {
+            self.entries.copy_within(1.., 0);
+            self.count -= 1;
+            dropped = true;
+        }
+        self.entries[self.count as usize] = hit;
+        self.count += 1;
+        dropped
+    }
+
+    fn clear(&mut self) {
+        self.count = 0;
+    }
+}
+
+impl Default for PendingHits {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SharedRgbState {
@@ -78,6 +169,9 @@ impl SharedRgbState {
             enabled: [0; MAX_LEDS],
             direct_colors: [(0, 0, 0); MAX_LEDS],
             direct_active: false,
+            pending_hits: PendingHits::new(),
+            heat: super::effects::impls::MatrixFrame::new(),
+            dropped_hits: 0,
         }
     }
 
@@ -201,6 +295,76 @@ impl SharedRgbState {
         self.direct_colors = [(0, 0, 0); MAX_LEDS];
         self.direct_active = false;
     }
+
+    /// Record one key press from the keyboard task.
+    ///
+    /// This is QMK's `process_rgb_matrix`'s body: the reactive hit buffer is
+    /// filled on every press, while the heat map is warmed only while
+    /// `TYPING_HEATMAP` is the selected effect.
+    ///
+    /// A position with no LED under it is ignored, matching QMK's
+    /// `led_count == 0` early path — the LED table is the only place that knows
+    /// which electrical positions carry a light.
+    pub fn record_key_press(&mut self, row: u8, col: u8) {
+        // The flattened table is indexed by LED chain position, and a linear scan
+        // over it is the same order `LedConfig::led_at` walks — there are tens of
+        // LEDs, and this runs on a key press rather than per frame.
+        let Some(index) = (0..self.led_count as usize).find(|&i| self.leds[i].matrix_pos == Some((row, col)))
+        else {
+            return;
+        };
+        let info = self.leds[index];
+        if self.pending_hits.push(PendingHit {
+            x: info.point.x,
+            y: info.point.y,
+            index: index as u8,
+        }) {
+            self.dropped_hits = self.dropped_hits.saturating_add(1);
+        }
+
+        // QMK warms the heat map only for the effect that reads it, so a press
+        // made while another effect is selected leaves no mark.
+        if self.config.mode() == super::registry::TYPING_HEATMAP
+            && (row as usize) < MATRIX_ROWS
+            && (col as usize) < MATRIX_COLS
+        {
+            super::effects::impls::typing_heatmap_record(&mut self.heat, row, col);
+        }
+    }
+
+    /// The heat map's cell grid, for the effect to read and cool.
+    #[inline]
+    pub fn heat(&mut self) -> &mut super::effects::impls::MatrixFrame<6, 4> {
+        &mut self.heat
+    }
+
+    /// Forget every cell's temperature.
+    ///
+    /// The effect clears this when it initialises, so selecting the heat map
+    /// starts cold: the keyboard task is the only writer, and without this its
+    /// leftover temperatures would be copied back in on the next frame.
+    #[inline]
+    pub fn clear_heat(&mut self) {
+        self.heat.clear();
+    }
+
+    /// The presses recorded since the last snapshot, oldest first.
+    #[inline]
+    pub fn pending_hits(&self) -> &[PendingHit] {
+        self.pending_hits.entries()
+    }
+
+    /// Clear the pending buffer once the engine has taken its snapshot.
+    #[inline]
+    pub fn take_pending_hits(&mut self) {
+        self.pending_hits.clear();
+    }
+
+    /// How many presses were lost to a full pending buffer.
+    #[inline]
+    pub const fn dropped_hits(&self) -> u16 {
+        self.dropped_hits
+    }
 }
 
 impl Default for SharedRgbState {
@@ -280,6 +444,15 @@ pub fn with_state<R>(f: impl FnOnce(&mut SharedRgbState) -> R) -> R {
 /// A copy of the configuration, for the engine's per-frame work.
 pub fn config_snapshot() -> RgbConfig {
     with_state(|s| s.config)
+}
+
+/// Forget every heat-map cell, for the effect's `init` frame.
+///
+/// The keyboard task holds the only other copy of this state, so the effect has
+/// to clear it here rather than only clearing its own snapshot.
+#[inline]
+pub fn clear_heat() {
+    with_state(|s| s.clear_heat());
 }
 
 /// Whether the host has written direct-mode pixels.
@@ -407,9 +580,77 @@ mod tests {
         assert!(s.enabled().iter().all(|id| *id == 7));
     }
 
+    /// A press on a position that carries an LED lands in the pending buffer,
+    /// carrying that LED's own coordinates and chain index.
+    ///
+    /// This is the keyboard-side half of the reactive path: nothing else in the
+    /// system can record a press, because the engine lives in its own task.
     #[test]
-    fn hsv_is_clamped_to_the_ceiling() {
-        let mut s = state();
+    fn a_press_on_a_mapped_position_fills_the_pending_buffer() {
+        let mut s = SharedRgbState::new();
+        s.set_leds(&LedConfig::new(
+            [LedPoint::new(10, 20), LedPoint::new(30, 40)],
+            [LED_FLAG_KEYLIGHT; 2],
+            [(1, 2), (3, 4)],
+        ));
+
+        s.record_key_press(3, 4);
+        let pending = s.pending_hits();
+        assert_eq!(pending.len(), 1, "one press recorded");
+        // The entry must carry the *LED's* point, not the matrix position.
+        assert_eq!((pending[0].x, pending[0].y), (30, 40));
+        assert_eq!(pending[0].index, 1);
+        assert_eq!(s.dropped_hits(), 0);
+
+        // A position with no LED under it records nothing, as QMK's
+        // `led_count == 0` path does.
+        s.record_key_press(0, 0);
+        assert_eq!(s.pending_hits().len(), 1, "unmapped press is ignored");
+    }
+
+    #[test]
+    fn the_pending_buffer_keeps_the_newest_presses_when_it_fills() {
+        let mut s = SharedRgbState::new();
+        let points = core::array::from_fn(|i| LedPoint::new(i as u8, 0));
+        let matrix = core::array::from_fn(|i| (0u8, i as u8));
+        s.set_leds(&LedConfig::new(points, [LED_FLAG_KEYLIGHT; PENDING_HITS + 2], matrix));
+
+        let total = PENDING_HITS + 2;
+        for col in 0..total {
+            s.record_key_press(0, col as u8);
+        }
+
+        assert_eq!(s.pending_hits().len(), PENDING_HITS, "bounded");
+        // The two oldest presses were dropped, so the buffer starts at col 2.
+        assert_eq!(s.pending_hits()[0].x, 2);
+        assert_eq!(s.dropped_hits(), total as u16 - PENDING_HITS as u16);
+    }
+
+    /// The heat map is warmed only while its own effect is selected, which is
+    /// what QMK's `process_rgb_matrix` checks before calling into it.
+    #[test]
+    fn heat_is_only_recorded_for_the_heat_map_effect() {
+        let mut s = SharedRgbState::new();
+        s.set_leds(&LedConfig::new(
+            [LedPoint::new(0, 0)],
+            [LED_FLAG_KEYLIGHT; 1],
+            [(0, 0)],
+        ));
+
+        // Another effect selected: the press must leave no heat.
+        s.config_mut().set_mode(registry::EFFECT_FIRST, registry::EFFECT_MAX);
+        s.record_key_press(0, 0);
+        assert_eq!(s.heat().get(0, 0), 0, "no heat while another effect runs");
+
+        // The heat map selected: the press warms the cell.
+        s.config_mut()
+            .set_mode(registry::TYPING_HEATMAP, registry::EFFECT_MAX);
+        s.record_key_press(0, 0);
+        assert!(s.heat().get(0, 0) > 0, "the press heats the cell");
+    }
+
+    #[test]
+    fn hsv_is_clamped_to_the_ceiling() {        let mut s = state();
         s.set_max_brightness(128);
         s.config_mut().enable();
         assert!(s.set_hsv(Hsv::new(10, 20, 255)));

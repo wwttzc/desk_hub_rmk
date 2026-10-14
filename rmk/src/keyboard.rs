@@ -23,7 +23,8 @@ use crate::core_traits::Runnable;
 #[cfg(all(feature = "split", feature = "_ble"))]
 use crate::event::ClearPeerEvent;
 use crate::event::{
-    ActionEvent, KeyboardEvent, KeyboardEventPos, ModifierEvent, SubscribableEvent, publish_event, publish_event_async,
+    ActionEvent, KeyPos, KeyboardEvent, KeyboardEventPos, ModifierEvent, SubscribableEvent, publish_event,
+    publish_event_async,
 };
 use crate::hid::{KeyboardReport, Report};
 use crate::keyboard::combo::Combo;
@@ -386,6 +387,18 @@ impl<'a> Keyboard<'a> {
 
         // Capture the event time once per event and thread it through.
         let event_time = Instant::now();
+
+        // Record the press for the reactive effects and the heat map, exactly as
+        // QMK's `process_rgb_matrix` does from `process_record`. This runs in the
+        // keyboard task — the RGB engine lives in its own task and cannot be
+        // reached from here — so the press is left in shared state for the engine
+        // to snap up at its next frame boundary.
+        #[cfg(feature = "rgb")]
+        if event.pressed
+            && let KeyboardEventPos::Key(KeyPos { row, col }) = event.pos
+        {
+            crate::rgb::via::record_key_event(row, col);
+        }
 
         // Process key
         let key_action = &self.keymap.get_action_with_layer_cache(event);
