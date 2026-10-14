@@ -277,18 +277,6 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
         &self.frame
     }
 
-    /// The host-driven pixel buffer, for `VIALRGB_DIRECT_FASTSET`.
-    #[inline]
-    pub fn direct_colors(&self) -> &super::vialrgb::DirectColors<LED_COUNT> {
-        &self.direct
-    }
-
-    /// Mutable access, so the protocol layer can write pixels.
-    #[inline]
-    pub fn direct_colors_mut(&mut self) -> &mut super::vialrgb::DirectColors<LED_COUNT> {
-        &mut self.direct
-    }
-
     /// Feed a key event to the hit tracker.
     ///
     /// This is QMK's `rgb_matrix_handle_key_event`. `pressed` selects which
@@ -310,15 +298,19 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
         self.hits.age(delta);
     }
 
+    /// The engine's current reading of `g_rgb_timer`.
+    ///
+    /// Exposed so a caller without the task's real clock can advance from where
+    /// the engine thinks it is rather than from an arbitrary epoch.
+    #[inline]
+    pub const fn timer_ms(&self) -> u32 {
+        self.timer_ms
+    }
+
     /// The state the engine needs to persist, as `StorageValue::RgbConfig`.
     #[inline]
     pub fn config_for_storage(&self) -> RgbConfig {
         self.config
-    }
-
-    /// Restore configuration read back from storage.
-    pub fn restore_config(&mut self, config: RgbConfig) {
-        self.config = config;
     }
 
     /// Advance the task by one step.
@@ -326,6 +318,7 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
     /// Drives the same four states as `rgb_matrix_task`. Returns the state the
     /// engine moved to, which the tests assert on and a real caller can ignore.
     pub async fn tick(&mut self) -> TaskState {
+        self.refresh_from_shared();
         match self.state {
             TaskState::Starting => self.start(),
             TaskState::Rendering => self.render(),
@@ -342,6 +335,25 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
             }
         }
         self.state
+    }
+
+    /// Take the configuration and any host-set pixels from the shared state.
+    ///
+    /// The Vial protocol writes [`super::shared`] from the host service task, so
+    /// this is what makes those writes reach a frame: without it the engine
+    /// would render a configuration the host could neither see nor change. It
+    /// runs once per tick, which keeps the copy off the render path and lets the
+    /// effects keep working on plain fields.
+    fn refresh_from_shared(&mut self) {
+        self.config = super::shared::config_snapshot();
+
+        // The flag is the common case: without a host-driven frame the pixels
+        // are meaningless and the copy is skipped entirely.
+        if !super::shared::direct_is_active() {
+            return;
+        }
+        let (first, second) = self.direct.halves_mut();
+        super::shared::copy_direct_colors(first, second);
     }
 
     /// `rgb_task_start`.
@@ -496,6 +508,10 @@ mod tests {
     }
 
     fn engine(config: RgbConfig) -> RgbEngine<N, MockDriver> {
+        // The shared state is the configuration's home; the engine takes its
+        // copy from there on the first tick, so a test that wants a particular
+        // one has to publish it before the machine runs.
+        crate::rgb::via::restore_config(config);
         RgbEngine::new(leds(), config, 255, MockDriver::default())
     }
 
@@ -553,14 +569,16 @@ mod tests {
     #[test]
     fn every_led_is_written_within_one_frame() {
         run(async {
-            let mut engine = engine(RgbConfig::default());
-            engine.config_mut().set_hsv(0, 255, 200, 255);
             // SOLID_COLOR: every LED the same colour.
-            engine.config_mut().set_mode(2, EFFECT_MAX);
+            let mut config = RgbConfig::default();
+            config.set_hsv(0, 255, 200, 255);
+            config.set_mode(2, EFFECT_MAX);
+            let hsv = config.hsv();
+            let mut engine = engine(config);
 
             run_frame(&mut engine).await;
 
-            let expected = crate::rgb::fx::color::hsv_to_rgb(engine.config().hsv());
+            let expected = crate::rgb::fx::color::hsv_to_rgb(hsv);
             assert_eq!(engine.frame.frame.pixels, [expected; N]);
         });
     }
@@ -583,12 +601,15 @@ mod tests {
     #[test]
     fn disabling_clears_the_frame_and_stops_the_effect() {
         run(async {
-            let mut engine = engine(RgbConfig::default());
-            engine.config_mut().set_hsv(0, 255, 255, 255);
+            let mut config = RgbConfig::default();
+            config.set_hsv(0, 255, 255, 255);
+            let mut engine = engine(config);
             run_frame(&mut engine).await;
             assert_ne!(engine.frame.frame.pixels[0], Rgb::BLACK, "lit while enabled");
 
-            engine.config_mut().disable();
+            // The configuration is the host's, so the switch that disables the
+            // keyboard travels through the same path Vial writes.
+            crate::rgb::shared::with_state(|s| s.config_mut().disable());
             engine.advance_time(LED_FLUSH_LIMIT_MS);
             run_frame(&mut engine).await;
             assert_eq!(engine.frame.frame.pixels, [Rgb::BLACK; N], "cleared when disabled");
@@ -599,9 +620,11 @@ mod tests {
     fn batching_renders_the_whole_chain_across_several_ticks() {
         run(async {
             // 6 LEDs, 2 per batch: three render ticks plus start/flush/sync.
-            let mut engine = engine(RgbConfig::default()).with_process_limit(2);
-            engine.config_mut().set_hsv(0, 255, 255, 255);
-            engine.config_mut().set_mode(2, EFFECT_MAX);
+            let mut config = RgbConfig::default();
+            config.set_hsv(0, 255, 255, 255);
+            config.set_mode(2, EFFECT_MAX);
+            let hsv = config.hsv();
+            let mut engine = engine(config).with_process_limit(2);
 
             let mut render_ticks = 0;
             for _ in 0..64 {
@@ -616,7 +639,7 @@ mod tests {
             }
 
             assert_eq!(render_ticks, 3, "6 LEDs at 2 per batch");
-            let expected = crate::rgb::fx::color::hsv_to_rgb(engine.config().hsv());
+            let expected = crate::rgb::fx::color::hsv_to_rgb(hsv);
             assert_eq!(engine.frame.frame.pixels, [expected; N], "every LED was reached");
         });
     }
@@ -624,10 +647,11 @@ mod tests {
     #[test]
     fn a_key_event_feeds_the_reactive_effects() {
         run(async {
-            let mut engine = engine(RgbConfig::default());
             // SOLID_REACTIVE_SIMPLE: only the hit LED lights.
-            engine.config_mut().set_hsv(0, 255, 255, 255);
-            engine.config_mut().set_mode(31, EFFECT_MAX);
+            let mut config = RgbConfig::default();
+            config.set_hsv(0, 255, 255, 255);
+            config.set_mode(31, EFFECT_MAX);
+            let mut engine = engine(config);
             // Key (1, 1) is LED index 4 in this table.
             engine.handle_key_event(1, 1, true);
 
@@ -645,9 +669,10 @@ mod tests {
     #[test]
     fn a_key_release_does_not_register_a_hit() {
         run(async {
-            let mut engine = engine(RgbConfig::default());
-            engine.config_mut().set_hsv(0, 255, 255, 255);
-            engine.config_mut().set_mode(31, EFFECT_MAX);
+            let mut config = RgbConfig::default();
+            config.set_hsv(0, 255, 255, 255);
+            config.set_mode(31, EFFECT_MAX);
+            let mut engine = engine(config);
             // `RGB_MATRIX_KEYRELEASES` is off, so only presses count.
             engine.handle_key_event(1, 1, false);
 
@@ -659,23 +684,58 @@ mod tests {
     #[test]
     fn the_engine_starts_in_syncing_and_waits_a_frame_before_drawing() {
         run(async {
-            let mut engine = engine(RgbConfig::default());
+            let engine = engine(RgbConfig::default());
             assert_eq!(engine.state(), TaskState::Syncing);
         });
     }
 
+    /// The configuration lives in the shared state, which is where the storage
+    /// layer puts a restored value; the engine reads it back on its next tick
+    /// rather than keeping a second copy.
     #[test]
-    fn config_round_trips_through_the_storage_handles() {
-        let mut engine = engine(RgbConfig::default());
-        let mut config = RgbConfig::default();
-        config.set_mode(24, EFFECT_MAX);
-        config.set_hsv(10, 20, 30, 255);
-        engine.restore_config(config);
+    fn a_configuration_restored_into_shared_reaches_the_engine() {
+        run(async {
+            let mut engine = engine(RgbConfig::default());
 
-        let stored = engine.config_for_storage();
-        assert_eq!(stored.mode(), 24);
-        assert_eq!(stored.hue(), 10);
-        assert_eq!(stored.val(), 30);
+            let mut restored = RgbConfig::default();
+            restored.set_mode(24, EFFECT_MAX);
+            restored.set_hsv(10, 20, 30, 255);
+            crate::rgb::via::restore_config(restored);
+
+            // Syncing -> Starting, which is where the effect is resolved.
+            engine.tick().await;
+
+            assert_eq!(engine.config().mode(), 24);
+            assert_eq!(engine.config().hue(), 10);
+            assert_eq!(engine.config().val(), 30);
+            assert_eq!(engine.config_for_storage().mode(), 24);
+        });
+    }
+
+    /// `VIALRGB_DIRECT_FASTSET`'s pixels reach the chain: the protocol writes
+    /// them into the shared state and the engine paints them.
+    #[test]
+    fn direct_mode_renders_the_hosts_pixels_into_the_frame() {
+        use crate::rgb::fx::color::hsv_to_rgb;
+        use crate::rgb::fx::color::Hsv;
+
+        run(async {
+            let mut engine = engine(RgbConfig::default());
+
+            crate::rgb::shared::with_state(|s| {
+                s.set_direct_color(0, 10, 200, 100);
+                s.set_direct_color(1, 200, 50, 80);
+                let config = s.config_mut();
+                config.enable();
+                config.set_mode_raw(crate::rgb::vialrgb::DIRECT_MODE);
+            });
+
+            run_frame(&mut engine).await;
+
+            assert_eq!(engine.frame.frame.pixels[0], hsv_to_rgb(Hsv::new(10, 200, 100)));
+            assert_eq!(engine.frame.frame.pixels[1], hsv_to_rgb(Hsv::new(200, 50, 80)));
+            assert_eq!(engine.frame.frame.pixels[2], Rgb::BLACK, "untouched LEDs stay dark");
+        });
     }
 
     #[test]

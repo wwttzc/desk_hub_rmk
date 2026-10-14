@@ -55,6 +55,13 @@ pub struct SharedRgbState {
     /// ported", which is what an unconfigured build gets.
     enabled_count: u8,
     enabled: [u16; MAX_LEDS],
+    /// `g_direct_mode_colors`: the per-LED colours `VIALRGB_DIRECT_FASTSET`
+    /// writes. Held here rather than in the engine because the protocol is what
+    /// writes them and the engine is what reads them.
+    direct_colors: [(u8, u8, u8); MAX_LEDS],
+    /// Whether the host has written a pixel since boot, `g_direct_mode_colors`
+    /// being valid at all.
+    direct_active: bool,
 }
 
 impl SharedRgbState {
@@ -69,6 +76,8 @@ impl SharedRgbState {
             leds: [LedInfo::EMPTY; MAX_LEDS],
             enabled_count: 0,
             enabled: [0; MAX_LEDS],
+            direct_colors: [(0, 0, 0); MAX_LEDS],
+            direct_active: false,
         }
     }
 
@@ -161,6 +170,37 @@ impl SharedRgbState {
     pub fn set_hsv(&mut self, hsv: Hsv) -> bool {
         self.config.set_hsv(hsv.h, hsv.s, hsv.v, self.max_brightness)
     }
+
+    /// Record one LED's host-driven colour, clamping the value as QMK's
+    /// `fast_set_leds` does.
+    ///
+    /// The first write is what makes the buffer authoritative, so the engine
+    /// switches to rendering it rather than an effect.
+    pub fn set_direct_color(&mut self, index: usize, h: u8, s: u8, v: u8) {
+        if index >= MAX_LEDS {
+            return;
+        }
+        self.direct_colors[index] = (h, s, v.min(self.max_brightness));
+        self.direct_active = true;
+    }
+
+    /// One LED's stored host colour.
+    #[inline]
+    pub fn direct_color(&self, index: usize) -> (u8, u8, u8) {
+        self.direct_colors[index]
+    }
+
+    /// Whether the host has written any pixel since boot.
+    #[inline]
+    pub const fn direct_is_active(&self) -> bool {
+        self.direct_active
+    }
+
+    /// Forget the host's pixels, returning the engine to effect rendering.
+    pub fn clear_direct_colors(&mut self) {
+        self.direct_colors = [(0, 0, 0); MAX_LEDS];
+        self.direct_active = false;
+    }
 }
 
 impl Default for SharedRgbState {
@@ -240,6 +280,29 @@ pub fn with_state<R>(f: impl FnOnce(&mut SharedRgbState) -> R) -> R {
 /// A copy of the configuration, for the engine's per-frame work.
 pub fn config_snapshot() -> RgbConfig {
     with_state(|s| s.config)
+}
+
+/// Whether the host has written direct-mode pixels.
+///
+/// The engine checks this before copying the buffer, so the usual effect-driven
+/// frame pays a single flag read.
+#[inline]
+pub fn direct_is_active() -> bool {
+    with_state(|s| s.direct_active)
+}
+
+/// Copy the host's direct-mode pixels into `first` and `second`.
+///
+/// The two halves together stand for the first `first.len() + second.len()`
+/// entries of the [`MAX_LEDS`] buffer; the engine owns a
+/// `DirectColors<LED_COUNT>` whose length is a compile-time constant, so it
+/// passes that array split in two rather than tying this module to the board.
+pub fn copy_direct_colors(first: &mut [(u8, u8, u8)], second: &mut [(u8, u8, u8)]) {
+    with_state(|s| {
+        let split = first.len();
+        first.copy_from_slice(&s.direct_colors[..split]);
+        second.copy_from_slice(&s.direct_colors[split..split + second.len()]);
+    });
 }
 
 /// Read one LED's description, for `GET_LED_INFO`.

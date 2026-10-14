@@ -25,7 +25,6 @@
 //! repeats an id would hang the GUI; [`supported_page`] is written so the
 //! returned ids always strictly increase.
 
-use super::engine::RgbEngine;
 use super::led_config::LedConfig;
 use super::registry;
 use super::state::RgbConfig;
@@ -229,21 +228,22 @@ fn enter_direct_mode(config: &mut RgbConfig) -> bool {
     changed
 }
 
-/// Apply a decoded write request to the engine.
+/// Apply a decoded write request to the shared state.
 ///
 /// Returns `true` when the configuration changed, so a caller can decide whether
 /// to persist.
-pub fn apply_set<const LED_COUNT: usize, F: super::engine::FrameBuffer>(
-    engine: &mut RgbEngine<LED_COUNT, F>,
-    request: Request,
-) -> bool {
+///
+/// Both the read-back (`GET_MODE`) and the render loop take their state from
+/// [`super::shared`], so this is the only writer of the configuration and there
+/// is no second copy for the two sides to disagree about.
+pub fn apply_set(state: &mut super::shared::SharedRgbState, request: Request) -> bool {
     match request {
         Request::SetMode { mode, speed, hsv } => {
-            let max = engine.max_brightness();
+            let max = state.max_brightness();
+            let config = state.config_mut();
             let mut changed = false;
             // QMK's `set_mode` first: id 0 disables, anything else enables and
             // selects. `rgb_matrix_enable_noeeprom`/`disable_noeeprom`.
-            let config = engine.config_mut();
             if mode == registry::EFFECT_OFF {
                 changed |= config.is_enabled();
                 config.disable();
@@ -261,23 +261,26 @@ pub fn apply_set<const LED_COUNT: usize, F: super::engine::FrameBuffer>(
             // Selecting a real effect hands the pixels back to the engine, so a
             // later return to direct mode starts from black rather than the host's
             // stale frame.
-            if mode != DIRECT_MODE && engine.direct_colors().is_active() {
-                engine.direct_colors_mut().clear();
+            if mode != DIRECT_MODE && state.direct_is_active() {
+                state.clear_direct_colors();
                 changed = true;
             }
             changed
         }
         Request::DirectFastSet { first, hsv, count } => {
-            // The host owns these pixels until it sends `SET_MODE` again.
-            enter_direct_mode(engine.config_mut());
-            let max = engine.max_brightness();
-            let colors = engine.direct_colors_mut();
+            // Nothing to render and no reason to leave effect mode.
+            if count == 0 {
+                return false;
+            }
+            // The host owns these pixels until it sends `SET_MODE` again. The
+            // mode is stored raw: id 1 sits below the first real effect, so
+            // `set_mode`'s clamp would move it.
+            let config = state.config_mut();
+            config.enable();
+            config.set_mode_raw(DIRECT_MODE);
+
             for (i, (h, s, v)) in hsv.iter().enumerate().take(count as usize) {
-                let index = first as usize + i;
-                if index >= LED_COUNT {
-                    break;
-                }
-                colors.set(index, *h, *s, *v, max);
+                state.set_direct_color(first as usize + i, *h, *s, *v);
             }
             true
         }
@@ -334,6 +337,16 @@ impl<const LED_COUNT: usize> DirectColors<LED_COUNT> {
     #[inline]
     pub const fn get(&self, index: usize) -> (u8, u8, u8) {
         self.hsv[index]
+    }
+
+    /// The buffer as two disjoint halves, for a bulk copy.
+    ///
+    /// [`super::shared`] holds the same pixels in a fixed [`MAX_LEDS`] array
+    /// rather than this board's `LED_COUNT`, so the copy is expressed as two
+    /// slices the caller passes down.
+    #[inline]
+    pub fn halves_mut(&mut self) -> (&mut [(u8, u8, u8)], &mut [(u8, u8, u8)]) {
+        self.hsv.split_at_mut(LED_COUNT / 2)
     }
 }
 
@@ -591,55 +604,55 @@ mod tests {
         assert_eq!(colors.get(0), (0, 0, 0));
     }
 
+    /// A shared state whose pixels are meaningful, standing in for the one the
+    /// host service writes and the engine reads.
+    fn state() -> super::super::shared::SharedRgbState {
+        let mut s = super::super::shared::SharedRgbState::new();
+        s.set_max_brightness(200);
+        s.config_mut().enable();
+        s
+    }
+
     #[test]
     fn set_mode_zero_disables_and_a_real_id_enables() {
-        use crate::rgb::engine::RgbEngine;
-        use crate::rgb::runner::ArrayFrame;
-
-        let leds = Box::leak(Box::new(leds()));
-        let mut engine = RgbEngine::<N, ArrayFrame<N>>::new(leds, RgbConfig::default(), 200, ArrayFrame::new());
-        let mut direct = DirectColors::<N>::new();
+        let mut s = state();
 
         // Disable via mode 0.
         assert!(apply_set(
-            &mut engine,
+            &mut s,
             Request::SetMode {
                 mode: 0,
                 speed: 0,
                 hsv: (0, 0, 0)
             }
-            ));
-        assert!(!engine.config().is_enabled());
+        ));
+        assert!(!s.config().is_enabled());
 
         // A real id enables and selects, clamping brightness to the ceiling.
         assert!(apply_set(
-            &mut engine,
+            &mut s,
             Request::SetMode {
                 mode: 24,
                 speed: 100,
                 hsv: (10, 20, 255)
             }
-            ));
-        assert!(engine.config().is_enabled());
-        assert_eq!(engine.config().mode(), 24);
-        assert_eq!(engine.config().speed(), 100);
-        assert_eq!(engine.config().val(), 200, "clamped to max_brightness");
+        ));
+        assert!(s.config().is_enabled());
+        assert_eq!(s.config().mode(), 24);
+        assert_eq!(s.config().speed(), 100);
+        assert_eq!(s.config().val(), 200, "clamped to max_brightness");
     }
 
     #[test]
     fn direct_fastset_activates_direct_mode() {
-        use crate::rgb::engine::RgbEngine;
-        use crate::rgb::runner::ArrayFrame;
-
-        let leds = Box::leak(Box::new(leds()));
-        let mut engine = RgbEngine::<N, ArrayFrame<N>>::new(leds, RgbConfig::default(), 255, ArrayFrame::new());
+        let mut s = state();
 
         let mut hsv = [(0u8, 0u8, 0u8); DIRECT_LEDS_PER_REPORT];
         hsv[0] = (1, 2, 3);
         hsv[1] = (4, 5, 6);
 
         assert!(apply_set(
-            &mut engine,
+            &mut s,
             Request::DirectFastSet {
                 first: 0,
                 hsv,
@@ -647,119 +660,116 @@ mod tests {
             }
         ));
 
-        assert!(engine.config().is_enabled());
-        assert_eq!(engine.config().mode(), DIRECT_MODE);
-        assert!(is_direct_mode(engine.config()));
+        assert!(s.config().is_enabled());
+        assert_eq!(s.config().mode(), DIRECT_MODE);
+        assert!(is_direct_mode(s.config()));
 
-        let direct = engine.direct_colors();
-        assert!(direct.is_active());
-        assert_eq!(direct.get(0), (1, 2, 3));
-        assert_eq!(direct.get(1), (4, 5, 6));
-        assert_eq!(direct.get(2), (0, 0, 0), "untouched LEDs stay black");
-    }
-
-    /// The whole point of DIRECT mode: the host's pixels reach the frame.
-    #[test]
-    fn direct_mode_renders_the_hosts_pixels_into_the_frame() {
-        use crate::rgb::engine::{RgbEngine, TaskState};
-        use crate::rgb::fx::color::{hsv_to_rgb, Hsv};
-        use crate::rgb::runner::ArrayFrame;
-
-        let leds = Box::leak(Box::new(leds()));
-        let mut engine = RgbEngine::<N, ArrayFrame<N>>::new(leds, RgbConfig::default(), 255, ArrayFrame::new());
-
-        let mut hsv = [(0u8, 0u8, 0u8); DIRECT_LEDS_PER_REPORT];
-        hsv[0] = (10, 200, 100);
-        hsv[1] = (200, 50, 80);
-        apply_set(
-            &mut engine,
-            Request::DirectFastSet {
-                first: 0,
-                hsv,
-                count: 2,
-            },
-        );
-
-        // Drive one frame to completion.
-        for _ in 0..16 {
-            if engine.tick_sync() == TaskState::Syncing {
-                break;
-            }
-        }
-
-        assert_eq!(engine.frame().pixels[0], hsv_to_rgb(Hsv::new(10, 200, 100)));
-        assert_eq!(engine.frame().pixels[1], hsv_to_rgb(Hsv::new(200, 50, 80)));
-        assert_eq!(engine.frame().pixels[2], crate::rgb::fx::color::Rgb::BLACK);
+        assert!(s.direct_is_active());
+        assert_eq!(s.direct_color(0), (1, 2, 3));
+        assert_eq!(s.direct_color(1), (4, 5, 6));
+        assert_eq!(s.direct_color(2), (0, 0, 0), "untouched LEDs stay black");
     }
 
     /// Leaving direct mode hands the pixels back to the effect engine, so a
     /// later return starts from black rather than a stale host frame.
     #[test]
     fn selecting_an_effect_clears_the_direct_pixels() {
-        use crate::rgb::engine::RgbEngine;
-        use crate::rgb::runner::ArrayFrame;
-
-        let leds = Box::leak(Box::new(leds()));
-        let mut engine = RgbEngine::<N, ArrayFrame<N>>::new(leds, RgbConfig::default(), 255, ArrayFrame::new());
+        let mut s = state();
 
         let mut hsv = [(0u8, 0u8, 0u8); DIRECT_LEDS_PER_REPORT];
         hsv[0] = (1, 2, 3);
         apply_set(
-            &mut engine,
+            &mut s,
             Request::DirectFastSet {
                 first: 0,
                 hsv,
                 count: 1,
             },
         );
-        assert!(engine.direct_colors().is_active());
+        assert!(s.direct_is_active());
 
         apply_set(
-            &mut engine,
+            &mut s,
             Request::SetMode {
                 mode: 24,
                 speed: 0,
                 hsv: (0, 0, 0),
             },
         );
-        assert!(!engine.direct_colors().is_active(), "returned to effect mode");
-        assert!(!is_direct_mode(engine.config()));
+        assert!(!s.direct_is_active(), "returned to effect mode");
+        assert!(!is_direct_mode(s.config()));
     }
 
+    /// An empty report carries no pixels, so it must not move a keyboard into
+    /// host-driven colour and blank the chain.
     #[test]
-    fn direct_fastset_ignores_leds_past_the_chain() {
-        use crate::rgb::engine::RgbEngine;
-        use crate::rgb::runner::ArrayFrame;
+    fn a_direct_fastset_with_no_leds_changes_nothing() {
+        let mut s = state();
+        let before = *s.config();
 
-        let leds = Box::leak(Box::new(leds()));
-        let mut engine = RgbEngine::<N, ArrayFrame<N>>::new(leds, RgbConfig::default(), 255, ArrayFrame::new());
+        assert!(!apply_set(
+            &mut s,
+            Request::DirectFastSet {
+                first: 0,
+                hsv: [(1, 1, 1); DIRECT_LEDS_PER_REPORT],
+                count: 0,
+            }
+        ));
+
+        assert_eq!(*s.config(), before);
+        assert!(!s.direct_is_active());
+    }
+
+    /// A report may name more LEDs than remain in the chain; the ones past the
+    /// end are dropped rather than wrapping or panicking.
+    #[test]
+    fn direct_fastset_ignores_leds_past_the_end_of_the_buffer() {
+        let mut s = state();
 
         let mut hsv = [(9u8, 9u8, 9u8); DIRECT_LEDS_PER_REPORT];
         hsv[0] = (1, 1, 1);
-        // Starting at N - 1 with a count of 9 writes one LED and stops.
+        // The last index the buffer accepts, with nine LEDs asked for.
+        let last = super::super::shared::MAX_LEDS - 1;
         apply_set(
-            &mut engine,
+            &mut s,
             Request::DirectFastSet {
-                first: (N - 1) as u16,
+                first: last as u16,
                 hsv,
                 count: 9,
             },
         );
-        let direct = engine.direct_colors();
-        assert_eq!(direct.get(N - 1), (1, 1, 1));
-        // Nothing beyond the chain exists to write.
-        assert_eq!(direct.get(0), (0, 0, 0));
+
+        assert_eq!(s.direct_color(last), (1, 1, 1), "the in-range LED is written");
+        // Nothing overflowed to the start of the buffer, and the writes past the
+        // end were dropped rather than wrapping.
+        assert_eq!(s.direct_color(0), (0, 0, 0));
+    }
+
+    /// The host's brightness is clamped on the way in, as `fast_set_leds` does,
+    /// so a report cannot drive the chain past the board's ceiling.
+    #[test]
+    fn direct_fastset_clamps_brightness_to_the_ceiling() {
+        let mut s = state();
+        s.set_max_brightness(120);
+
+        let mut hsv = [(0u8, 0u8, 0u8); DIRECT_LEDS_PER_REPORT];
+        hsv[0] = (0, 255, 255);
+        apply_set(
+            &mut s,
+            Request::DirectFastSet {
+                first: 0,
+                hsv,
+                count: 1,
+            },
+        );
+
+        assert_eq!(s.direct_color(0), (0, 255, 120), "value clamped to the ceiling");
     }
 
     #[test]
     fn a_read_request_changes_nothing() {
-        use crate::rgb::engine::RgbEngine;
-        use crate::rgb::runner::ArrayFrame;
-
-        let leds = Box::leak(Box::new(leds()));
-        let mut engine = RgbEngine::<N, ArrayFrame<N>>::new(leds, RgbConfig::default(), 255, ArrayFrame::new());
-        let mut direct = DirectColors::<N>::new();
-        assert!(!apply_set(&mut engine, Request::GetInfo));
-        assert!(!apply_set(&mut engine, Request::Unknown));
+        let mut s = state();
+        assert!(!apply_set(&mut s, Request::GetInfo));
+        assert!(!apply_set(&mut s, Request::Unknown));
     }
 }

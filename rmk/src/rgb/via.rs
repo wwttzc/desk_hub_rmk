@@ -117,68 +117,40 @@ pub fn handle_set(report: &mut [u8]) -> Outcome {
     if report.len() != REPORT_SIZE {
         return Outcome::Unsupported;
     }
-    match vialrgb::decode_set(report) {
-        Request::SetMode { mode, speed, hsv } => {
-            let changed = shared::with_state(|s| {
-                let max = s.max_brightness();
-                let mut changed = false;
-                let config = s.config_mut();
+    // One decode, then one critical section: the mode change and any `0x09`
+    // save both describe the same state the engine renders from.
+    let request = vialrgb::decode_set(report);
+    if let Request::GetInfo
+    | Request::GetMode
+    | Request::GetSupported { .. }
+    | Request::GetNumberLeds
+    | Request::GetLedInfo { .. }
+    | Request::Unknown = request
+    {
+        return Outcome::Unsupported;
+    }
 
-                // `set_mode` first: id 0 disables, id 1 is host-driven colours,
-                // anything else selects an effect. The enabled check and the
-                // range clamp live in `RgbConfig`, except for the two sentinels
-                // that sit outside the effect range.
-                if mode == registry::EFFECT_OFF {
-                    changed |= config.is_enabled();
-                    config.disable();
-                } else if mode == vialrgb::DIRECT_MODE {
-                    changed |= !config.is_enabled() || config.mode() != vialrgb::DIRECT_MODE;
-                    config.enable();
-                    config.set_mode_raw(vialrgb::DIRECT_MODE);
-                } else {
-                    changed |= !config.is_enabled();
-                    config.enable();
-                    changed |= config.set_mode(mode, registry::EFFECT_MAX);
-                }
-
-                // Speed is not gated on `enable`, matching QMK.
-                changed |= config.set_speed(speed);
-                changed |= config.set_hsv(hsv.0, hsv.1, hsv.2, max);
-                changed
-            });
-
-            if changed {
-                // The write path does not touch flash: Vial sends one report per
-                // slider step and each must not cost a page write. The flag is
-                // what `CustomSave` (0x09) later consumes.
-                shared::mark_dirty();
-                Outcome::Changed
-            } else {
-                Outcome::Handled
-            }
+    let changed = shared::with_state(|s| {
+        let was = *s.config();
+        let applied = vialrgb::apply_set(s, request);
+        // `DIRECT_FASTSET` changes the host's pixels every report, which is not
+        // something to persist; only a report that also moved the mode out of
+        // effect rendering needs a save.
+        if matches!(request, Request::DirectFastSet { .. }) {
+            applied && (s.config().mode() != was.mode() || s.config().enable != was.enable)
+        } else {
+            applied
         }
-        Request::DirectFastSet { first, hsv, count } => {
-            shared::with_state(|s| {
-                let max = s.max_brightness();
-                let led_count = s.led_count();
-                let config = s.config_mut();
-                config.enable();
-                config.set_mode_raw(vialrgb::DIRECT_MODE);
+    });
 
-                // The per-LED pixels are the engine's, so they are written
-                // through the direct-colour buffer rather than here; this arm
-                // only selects the mode and validates the range.
-                let _ = (first, hsv, count, max, led_count);
-            });
-            // The engine picks the pixels up from its own buffer.
-            Outcome::Changed
-        }
-        Request::GetInfo
-        | Request::GetMode
-        | Request::GetSupported { .. }
-        | Request::GetNumberLeds
-        | Request::GetLedInfo { .. }
-        | Request::Unknown => Outcome::Unsupported,
+    if changed {
+        // The write path does not touch flash: Vial sends one report per slider
+        // step and each must not cost a page write. The flag is what
+        // `CustomSave` (0x09) later consumes.
+        shared::mark_dirty();
+        Outcome::Changed
+    } else {
+        Outcome::Handled
     }
 }
 
@@ -612,5 +584,98 @@ mod tests {
         install(&LedConfig::<0>::new([], [], []), 255, &[]);
         assert!(!is_supported());
         setup();
+    }
+
+    /// The whole point of the two halves meeting in [`shared`]: a report Vial
+    /// writes must reach the pixels.
+    ///
+    /// The regression this guards is subtle. The engine keeps its own copy of
+    /// the configuration and used to build it once from the compiled-in
+    /// defaults, so every `SET_MODE` updated the state Vial reads back while the
+    /// chain kept animating whatever it started with — a UI that looked
+    /// connected and did nothing.
+    ///
+    /// The engine is deliberately built at the *same* effect with a different
+    /// colour: a test that changed both would pass on a stale frame too, which
+    /// is exactly how the original bug slipped through.
+    #[test]
+    fn a_mode_written_by_vial_reaches_the_engine() {
+        use crate::rgb::engine::RgbEngine;
+        use crate::rgb::fx::color::{hsv_to_rgb, Hsv};
+        use crate::rgb::runner::ArrayFrame;
+
+        setup();
+        // The board starts on SOLID_COLOR in red.
+        let mut initial = RgbConfig::new_const();
+        initial.set_hsv(0, 255, 255, 255);
+        restore_config(initial);
+
+        install(&table(), 255, &[]);
+        let leds: &'static LedConfig<N> = Box::leak(Box::new(table()));
+        let mut engine = RgbEngine::<N, ArrayFrame<N>>::new(leds, initial, 255, ArrayFrame::new());
+
+        run_frame(&mut engine);
+        assert_eq!(
+            engine.frame().pixels[0],
+            hsv_to_rgb(Hsv::new(0, 255, 255)),
+            "the board's own colour renders first"
+        );
+
+        // Vial asks for the same effect in green.
+        let mut set = report(0x07, SUB_SET_MODE);
+        set[2..4].copy_from_slice(&registry::EFFECT_FIRST.to_le_bytes());
+        set[4] = 0;
+        set[5] = 85;
+        set[6] = 255;
+        set[7] = 255;
+        assert_eq!(handle_set(&mut set), Outcome::Changed);
+
+        run_frame(&mut engine);
+        let expected = hsv_to_rgb(Hsv::new(85, 255, 255));
+        assert_eq!(engine.frame().pixels[0], expected, "Vial's colour renders");
+        assert_eq!(engine.frame().pixels[1], expected);
+
+        setup();
+    }
+
+    /// Run the machine to completion for one frame.
+    ///
+    /// The clock is advanced on every step: `Syncing` holds a frame back until
+    /// `RGB_MATRIX_LED_FLUSH_LIMIT` has passed, and these tests have no real
+    /// timer to advance it for them. Without this the loop exits on the first
+    /// `Syncing` and leaves the previous frame in place, which would make a
+    /// "the frame changed" assertion pass or fail for the wrong reason.
+    fn run_frame<const LED_COUNT: usize, F: crate::rgb::engine::FrameBuffer>(
+        engine: &mut crate::rgb::engine::RgbEngine<LED_COUNT, F>,
+    ) {
+        use crate::rgb::engine::{TaskState, LED_FLUSH_LIMIT_MS};
+
+        fn block_on<Fut: core::future::Future>(fut: Fut) -> Fut::Output {
+            use core::task::{Context, Poll, Waker};
+            fn noop_waker() -> Waker {
+                use core::task::{RawWaker, RawWakerVTable};
+                const VTABLE: RawWakerVTable = RawWakerVTable::new(|_| RAW, |_| {}, |_| {}, |_| {});
+                const RAW: RawWaker = RawWaker::new(core::ptr::null(), &VTABLE);
+                // Safety: every vtable entry is a no-op and no state is read
+                // through the null data pointer.
+                unsafe { Waker::from_raw(RAW) }
+            }
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            let mut fut = core::pin::pin!(fut);
+            for _ in 0..64 {
+                if let Poll::Ready(out) = fut.as_mut().poll(&mut cx) {
+                    return out;
+                }
+            }
+            panic!("the RGB driver suspended; these tests use drivers that never await");
+        }
+
+        for _ in 0..64 {
+            engine.advance_time(engine.timer_ms().wrapping_add(LED_FLUSH_LIMIT_MS));
+            if block_on(engine.tick()) == TaskState::Syncing {
+                break;
+            }
+        }
     }
 }
