@@ -12,8 +12,12 @@
 //!   written in terms of.
 //! - [`led_config`] — the LED table: positions, flags and key mapping.
 //! - [`state`] — the run-time configuration and effect-switching rules.
-//! - (planned) `runner`, `effects`, `vialrgb`.
+//! - [`hit_tracker`] — recent key hits, the input to reactive effects.
+//! - [`runner`] — the generic runners and the batched-iteration contract.
+//! - (planned) `effects`, `vialrgb`.
 
 pub mod fx;
+pub mod hit_tracker;
 pub mod led_config;
+pub mod runner;
 pub mod state;
