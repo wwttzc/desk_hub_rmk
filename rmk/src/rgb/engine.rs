@@ -128,6 +128,10 @@ pub struct RgbEngine<const LED_COUNT: usize, F: FrameBuffer> {
     /// Ledger mirror of `frame.params`, held separately so the effect call does
     /// not borrow the frame mutably twice.
     process_limit: usize,
+    /// `k_rgb_matrix_center`, from `RGB_MATRIX_CENTER`.
+    center: super::led_config::LedPoint,
+    /// `RGB_MATRIX_LED_FLUSH_LIMIT`, from the board configuration.
+    flush_limit_ms: u32,
     /// The frame clock, QMK's `g_rgb_timer`.
     timer_ms: u32,
     /// When the current frame started, for the flush-limit wait.
@@ -153,6 +157,8 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
             frame,
             ctx: FrameContext::default(),
             process_limit: default_process_limit(LED_COUNT),
+            center: super::led_config::DEFAULT_CENTER,
+            flush_limit_ms: LED_FLUSH_LIMIT_MS,
             timer_ms: 0,
             // Seed the frame clock one flush limit in the past so the first
             // `Syncing` tick releases immediately: the keyboard should light on
@@ -166,6 +172,20 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
     /// Override the batch size, from `rgb_matrix.led_process_limit`.
     pub fn with_process_limit(mut self, limit: usize) -> Self {
         self.process_limit = limit;
+        self
+    }
+
+    /// Override the centroid the distance-based effects measure from,
+    /// `RGB_MATRIX_CENTER`.
+    pub fn with_center(mut self, center: super::led_config::LedPoint) -> Self {
+        self.center = center;
+        self
+    }
+
+    /// Override the minimum milliseconds between frames,
+    /// `RGB_MATRIX_LED_FLUSH_LIMIT`.
+    pub fn with_flush_limit(mut self, limit_ms: u32) -> Self {
+        self.flush_limit_ms = limit_ms;
         self
     }
 
@@ -288,7 +308,7 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
             TaskState::Syncing => {
                 // `rgb_task_sync`: hold a frame back until the flush limit has
                 // passed, so a fast caller cannot exceed the configured rate.
-                if self.timer_ms.wrapping_sub(self.frame_started_ms) >= LED_FLUSH_LIMIT_MS {
+                if self.timer_ms.wrapping_sub(self.frame_started_ms) >= self.flush_limit_ms {
                     self.state = TaskState::Starting;
                 }
             }
@@ -355,16 +375,16 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
             &RenderContext {
                 leds,
                 config,
-                center: super::led_config::DEFAULT_CENTER,
-                time: *timer_ms,
-                process_limit: *process_limit,
-            },
-            &ctx.params,
-            hits,
-            rng,
-            raindrops_index,
-            frame,
-        );
+                    center: self.center,
+                    time: *timer_ms,
+                    process_limit: *process_limit,
+                },
+                &ctx.params,
+                hits,
+                rng,
+                raindrops_index,
+                frame,
+            );
 
         self.ctx.params.iter = self.ctx.params.iter.saturating_add(1);
 

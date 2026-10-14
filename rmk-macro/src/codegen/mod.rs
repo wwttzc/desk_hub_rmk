@@ -12,6 +12,7 @@ pub(crate) mod matrix;
 pub(crate) mod orchestrator;
 pub(crate) mod override_helper;
 pub(crate) mod registered_processor;
+pub(crate) mod rgb;
 #[cfg(feature = "_simulator")]
 pub(crate) mod simulator;
 pub(crate) mod split;

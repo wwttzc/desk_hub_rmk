@@ -26,6 +26,7 @@ use super::keyboard_config::{
 use super::keymap::expand_default_keymap;
 use super::matrix::{expand_bootmagic_check, expand_matrix_config};
 use super::registered_processor::expand_registered_processor_init;
+use super::rgb::expand_rgb_config;
 use super::split::central::expand_split_central_config;
 use super::watchdog::expand_watchdog_init;
 
@@ -308,6 +309,40 @@ fn expand_main(
         quote! {}
     };
 
+    // RGB Matrix — read `rgb.toml` from beside `keyboard.toml` and emit the LED
+    // table, the enabled effects and the engine. Absent or disabled emits
+    // nothing, so a board without an LED chain is unaffected.
+    //
+    // Only when the `rgb` feature is on: the generated code names
+    // `::rmk::rgb::*`, which does not exist otherwise, and a user who sets
+    // `rgb.toml` without the feature should get a warning rather than a wall of
+    // resolution errors.
+    let rgb_init = if is_feature_enabled(rmk_features, "rgb") {
+        let keyboard_toml_path = std::env::var("KEYBOARD_TOML_PATH").ok();
+        let keyboard_toml_path = keyboard_toml_path.as_deref().map(std::path::Path::new);
+        let rgb_toml = rmk_config::rgb::RgbTomlConfig::load_for(keyboard_toml_path)
+            .unwrap_or_else(|e| panic!("❌ rgb.toml error: {e}"));
+        let expansion = expand_rgb_config(rgb_toml.as_ref(), &hardware.chip)
+            .unwrap_or_else(|e| panic!("❌ rgb.toml error: {e}"));
+        for warning in &expansion.warnings {
+            // The macro cannot emit `cargo:warning`; these surface through the
+            // generated code's own compile output instead, which is enough to
+            // point at the file.
+            eprintln!("rmk: warning: {warning}");
+        }
+        let definitions = expansion.definitions;
+        let initializer = expansion.initializer;
+        if let Some(runner) = expansion.runner {
+            registered_processors.push(runner);
+        }
+        quote! {
+            #definitions
+            #initializer
+        }
+    } else {
+        quote! {}
+    };
+
     // Rynk-only: bake the physical-layout blob as a compile-time const and enable
     // the lock gate. Both fields land adjacently in the `RmkConfig` literal below.
     let (layout_blob_static, rynk_layout_field, lock_config) = if host.rynk_enabled {
@@ -434,6 +469,11 @@ fn expand_main(
 
             // Initialize display (if configured)
             #display_init
+
+            // Initialize storage and the RGB engine (if `rgb.toml` configures
+            // it). The engine is built here so it exists before the processors
+            // below start running.
+            #rgb_init
 
             // Initialize split central config(if needed)
             #split_central_config
