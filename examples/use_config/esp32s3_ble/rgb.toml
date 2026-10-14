@@ -1,0 +1,95 @@
+# RGB Matrix configuration for the esp32s3 bring-up example.
+#
+# The LED table below is a placeholder that mirrors the example's 4x3 matrix:
+# one LED per key, positions spread across QMK's 0..=224 by 0..=64 space. A real
+# board's table comes from its PCB coordinates, not from a formula like this.
+
+[rgb_matrix]
+enabled = true
+# A 12-LED chain at full white would draw roughly 0.7 A, so cap it below 255 for
+# a first bring-up. Vial's brightness slider tops out at this value.
+max_brightness = 100
+# QMK's default centre.
+center_point = [112, 32]
+
+[rgb_matrix.default]
+on = true
+animation = "cycle_left_right"
+hue = 0
+sat = 255
+val = 100
+speed = 127
+
+# Leave [rgb_matrix.animations] out entirely: an empty table enables every
+# effect that is implemented, which is the right default while bringing a board
+# up. List names explicitly to narrow it down.
+
+# One entry per LED, in chain order. 4 rows x 3 columns = 12.
+[[rgb_matrix.layout]]
+x = 0
+y = 0
+matrix = [0, 0]
+
+[[rgb_matrix.layout]]
+x = 112
+y = 0
+matrix = [0, 1]
+
+[[rgb_matrix.layout]]
+x = 224
+y = 0
+matrix = [0, 2]
+
+[[rgb_matrix.layout]]
+x = 0
+y = 21
+matrix = [1, 0]
+
+[[rgb_matrix.layout]]
+x = 112
+y = 21
+matrix = [1, 1]
+
+[[rgb_matrix.layout]]
+x = 224
+y = 21
+matrix = [1, 2]
+
+[[rgb_matrix.layout]]
+x = 0
+y = 43
+matrix = [2, 0]
+
+[[rgb_matrix.layout]]
+x = 112
+y = 43
+matrix = [2, 1]
+
+[[rgb_matrix.layout]]
+x = 224
+y = 43
+matrix = [2, 2]
+
+[[rgb_matrix.layout]]
+x = 0
+y = 64
+matrix = [3, 0]
+
+[[rgb_matrix.layout]]
+x = 112
+y = 64
+matrix = [3, 1]
+
+[[rgb_matrix.layout]]
+x = 224
+y = 64
+matrix = [3, 2]
+
+[ws2812]
+# The devkit's on-board addressable LED. A real board names the GPIO driving the
+# first LED of the chain.
+pin = "GPIO48"
+driver = "rmt"
+rgbw = false
+# WS2812 wants green first, which is the driver's default.
+color_order = "grb"

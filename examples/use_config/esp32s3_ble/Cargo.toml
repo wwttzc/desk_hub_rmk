@@ -14,7 +14,9 @@ rmk = { path = "../../../rmk", default-features = false, features = [
     "esp32s3_ble",
     "log",
     "storage",
-    "vial"
+    "vial",
+    "rgb",
+    "smart_leds"
 ] }
 embassy-executor = { version = "0.10" }
 esp-backtrace = { version = "0.20", features = [
@@ -30,6 +32,12 @@ esp-radio = { version = "1.0.0-beta.1", features = ["esp32s3", "unstable", "ble"
 esp-rtos = { version = "0.4", features = ["esp32s3", "esp-radio", "embassy"] }
 esp-bootloader-esp-idf = { version = "0.6", features = ["esp32s3", "log-04"] }
 bt-hci = { version = "0.10" }
+# The RMT-based WS2812 driver. Its chip feature is deliberately not enabled:
+# `esp-hal-smartled` only needs the *peripheral* API, and the chip selection
+# arrives through the `esp-hal` features above, which Cargo unifies across the
+# graph. Enabling its `esp32s3` feature would additionally reference crates it
+# only has as dev-dependencies.
+esp-hal-smartled = { version = "0.18", default-features = false }
 
 [build-dependencies]
 xz2 = "0.1.7"
