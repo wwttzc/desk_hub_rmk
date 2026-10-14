@@ -721,6 +721,24 @@ mod tests {
     }
 
     #[test]
+    fn rgb_reserves_a_keyboard_event_subscriber() {
+        // rgb/engine.rs subscribes to KeyboardEvent so the reactive, splash and
+        // heat-map effects can see key presses. Without a reserved slot the
+        // engine's subscriber() would exceed KEYBOARD_EVENT_SUB_SIZE and panic
+        // when the RGB task starts.
+        let base = parse("").build_constants(&[]).unwrap();
+        let rgb = parse("").build_constants(&["rgb"]).unwrap();
+
+        let subs =
+            |constants: &BuildConstants, event: &str| constants.events.iter().find(|e| e.name == event).unwrap().subs;
+        assert_eq!(
+            subs(&rgb, "keyboard"),
+            subs(&base, "keyboard") + 1,
+            "the RGB engine needs a keyboard subscriber slot"
+        );
+    }
+
+    #[test]
     fn validates_capability_wire_widths() {
         assert!(validate_u8_capability("ble_profiles_num", 255).is_ok());
         assert_eq!(

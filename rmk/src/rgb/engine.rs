@@ -21,12 +21,15 @@
 //! on a fixed cadence; the tests drive it by hand, which is what makes the
 //! batching contract testable without hardware.
 
+use embassy_futures::select::{Either, select};
+
 use super::fx::random8::Rng;
 use super::hit_tracker::HitTracker;
 use super::led_config::LedConfig;
 use super::registry::{self, EFFECT_OFF};
 use super::runner::{EffectParams, FrameAll, LedFrame, RenderContext};
 use super::state::RgbConfig;
+use crate::event::{EventSubscriber, KeyPos, KeyboardEvent, KeyboardEventPos, SubscribableEvent};
 
 /// `RGB_MATRIX_LED_FLUSH_LIMIT`: the minimum milliseconds between frames.
 ///
@@ -83,21 +86,45 @@ impl<T: LedFrame + FrameAll + LedDriver> FrameBuffer for T {}
 pub const TICK_INTERVAL_MS: u64 = 4;
 
 impl<const LED_COUNT: usize, F: FrameBuffer> crate::core_traits::Runnable for RgbEngine<LED_COUNT, F> {
-    /// Drive the task forever.
+    /// Drive the task forever, feeding the hit tracker from the keyboard.
     ///
     /// Each wake advances the state machine by one step and ages the hit
     /// tracker, so a reactive effect's decay follows real time rather than the
     /// number of frames.
+    ///
+    /// The task also subscribes to [`KeyboardEvent`]: the reactive effects, the
+    /// splash family and `TYPING_HEATMAP` all read the hit tracker, and the
+    /// engine owns it, so nothing else can fill it in. The subscription is what
+    /// makes a key press reach those effects at all.
     ///
     /// The clock is `embassy_time::Instant`, converted to the millisecond
     /// counter QMK's `g_rgb_timer` is. Truncating to `u32` wraps after about 49
     /// days of uptime; every comparison against it is `wrapping_sub`, so the
     /// wrap is handled the same way QMK handles it.
     async fn run(&mut self) -> ! {
+        let mut keyboard = KeyboardEvent::subscriber();
+
         loop {
+            // Whichever comes first: a key press to record, or the tick that
+            // keeps the animation moving. `select` is what lets one task own
+            // both; awaiting the subscriber alone would stall the animation on a
+            // board nobody is typing on.
+            match select(self.tick(), keyboard.next_event()).await {
+                Either::First(_) => {}
+                Either::Second(event) => {
+                    if let KeyboardEventPos::Key(KeyPos { row, col }) = event.pos
+                        && event.pressed
+                    {
+                        self.handle_key_event(row, col, true);
+                    }
+                }
+            }
+
+            // The state machine is time-driven, so the clock is sampled on every
+            // pass — including the passes an event woke.
             let now = embassy_time::Instant::now().as_millis() as u32;
             self.advance_time(now);
-            self.tick().await;
+
             embassy_time::Timer::after_millis(TICK_INTERVAL_MS).await;
         }
     }

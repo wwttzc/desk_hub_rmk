@@ -742,10 +742,12 @@ pub fn digital_rain<const LED_COUNT: usize, F: LedFrame>(
         return false;
     }
 
+    // Diagnostic: count where droplets are actually spawned.
+    static SPAWNED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
     for col in 0..COLS {
         for row in 0..ROWS {
             let cell = frame_buf.get(row, col);
-            if row == 0 && *drop == 0 && (rng.next16() % DROPS == 0) {
+            if row == 0 && *drop == 0 && rng.next8_max(DROPS as u8) == 0 {
                 // A fresh droplet starts at the top of this column.
                 frame_buf.set(row, col, MAX_INTENSITY);
             } else if cell > 0 && cell < MAX_INTENSITY {
@@ -1500,6 +1502,88 @@ mod tests {
                 assert_eq!(frame_buf.get(row, col), 0, "cell ({row},{col}) was not cooled");
             }
         }
+    }
+
+    /// `DIGITAL_RAIN` must eventually light every column, not just one.
+    ///
+    /// The board's real 19 matrix positions are used, because the effect walks
+    /// the *electrical* grid and finds each cell's LED through `matrix_pos`; a
+    /// wrong table would show up here as columns that never light.
+    #[test]
+    fn digital_rain_lights_every_column() {
+        use crate::rgb::led_config::{LedConfig, LedPoint};
+        use crate::rgb::runner::ArrayFrame;
+
+        // The 19 electrical positions of the real numpad.
+        const POS: [(u8, u8); 19] = [
+            (0, 0),
+            (0, 1),
+            (1, 0),
+            (1, 1),
+            (1, 2),
+            (1, 3),
+            (2, 0),
+            (2, 1),
+            (2, 2),
+            (3, 0),
+            (3, 1),
+            (3, 2),
+            (3, 3),
+            (4, 0),
+            (4, 1),
+            (4, 2),
+            (5, 0),
+            (5, 2),
+            (5, 3),
+        ];
+        const N: usize = POS.len();
+
+        let mut points = [LedPoint::new(0, 0); N];
+        let mut matrix = [(0u8, 0u8); N];
+        for (i, &(row, col)) in POS.iter().enumerate() {
+            points[i] = LedPoint::new(col * 44, row * 44);
+            matrix[i] = (row, col);
+        }
+        let leds = Box::leak(Box::new(LedConfig::from_matrix(points, matrix)));
+
+        let config = RgbConfig::with_defaults(true, 100, 200, 128, 0xFF, 255);
+        let mut rng = Rng::with_seed(2024);
+        let mut frame_buf = MatrixFrame::<6, 4>::new();
+        let mut drop = 0u8;
+        let mut lit_cols = [false; 4];
+
+        for frame in 0..4000u32 {
+            let ctx = RenderContext {
+                leds,
+                config: &config,
+                center: RenderContext::<N>::DEFAULT_CENTER,
+                time: frame,
+                process_limit: 4,
+            };
+            let params = EffectParams {
+                iter: 0,
+                flags: 0xFF,
+                init: frame == 0,
+            };
+            let mut frame_buf_out = ArrayFrame::<N>::new();
+            digital_rain(&ctx, &params, &mut frame_buf, &mut rng, &mut drop, &mut frame_buf_out);
+
+            for (i, &(_, col)) in POS.iter().enumerate() {
+                let p = frame_buf_out.pixels[i];
+                if p != Rgb::BLACK {
+                    lit_cols[col as usize] = true;
+                }
+            }
+        }
+
+        assert!(
+            lit_cols.iter().all(|&lit| lit),
+            "every column should light at some point, got {lit_cols:?}\n\
+             final frame_buf by column: {:?}",
+            (0..4)
+                .map(|c| (0..6).map(|r| frame_buf.get(r, c)).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
