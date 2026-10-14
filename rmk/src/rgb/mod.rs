@@ -16,9 +16,11 @@
 //! - [`runner`] — the generic runners and the batched-iteration contract.
 //! - [`effects`] — the effect bodies themselves, ported one per QMK file.
 //! - [`registry`] — the effect table: ids, names, config keys and dispatch.
-//! - (planned) `engine`, `vialrgb`.
+//! - [`engine`] — the task that renders frames and drives a LED driver.
+//! - (planned) `vialrgb`.
 
 pub mod effects;
+pub mod engine;
 pub mod fx;
 pub mod hit_tracker;
 pub mod led_config;
