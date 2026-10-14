@@ -28,7 +28,7 @@ use crate::rgb::effects::impls;
 use crate::rgb::fx::random8::Rng;
 use crate::rgb::hit_tracker::HitTracker;
 use crate::rgb::led_config::LED_FLAG_ALL;
-use crate::rgb::runner::{EffectParams, FrameAll, LedFrame, RenderContext};
+use crate::rgb::runner::{EffectParams, FrameAll, FrameChain, LedFrame, RenderContext};
 
 /// VialRGB's `VIALRGB_EFFECT_OFF`: the LEDs are off, not animating.
 pub const EFFECT_OFF: u16 = 0;
@@ -243,7 +243,7 @@ pub fn is_enabled(id: u16, enabled: &[u16]) -> bool {
 /// and the state a host reads back stays coherent; the build-time check is what
 /// reports the gap.
 #[allow(clippy::too_many_arguments)]
-pub fn dispatch<const LED_COUNT: usize, F: LedFrame + FrameAll>(
+pub fn dispatch<const LED_COUNT: usize, F: LedFrame + FrameAll + FrameChain>(
     id: u16,
     ctx: &RenderContext<'_, LED_COUNT>,
     params: &EffectParams,

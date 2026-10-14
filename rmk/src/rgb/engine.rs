@@ -25,7 +25,7 @@ use super::fx::random8::Rng;
 use super::hit_tracker::HitTracker;
 use super::led_config::LedConfig;
 use super::registry::{self, EFFECT_OFF};
-use super::runner::{EffectParams, FrameAll, LedFrame, RenderContext};
+use super::runner::{EffectParams, FrameAll, FrameChain, LedFrame, RenderContext};
 use super::state::RgbConfig;
 
 /// `RGB_MATRIX_LED_FLUSH_LIMIT`: the minimum milliseconds between frames.
@@ -71,9 +71,9 @@ pub trait LedDriver {
 
 /// What the engine needs from a frame buffer: the effect write path, the
 /// all-LEDs fill that `RGB_MATRIX_NONE` uses, and a way to flush.
-pub trait FrameBuffer: LedFrame + FrameAll + LedDriver {}
+pub trait FrameBuffer: LedFrame + FrameAll + FrameChain + LedDriver {}
 
-impl<T: LedFrame + FrameAll + LedDriver> FrameBuffer for T {}
+impl<T: LedFrame + FrameAll + FrameChain + LedDriver> FrameBuffer for T {}
 
 /// How often the engine's task wakes to advance the state machine.
 ///
@@ -568,6 +568,12 @@ mod tests {
     impl FrameAll for MockDriver {
         fn set_all(&mut self, rgb: Rgb) {
             self.frame.fill(rgb);
+        }
+    }
+
+    impl FrameChain for MockDriver {
+        fn set_chain(&mut self, chain: &[Rgb]) {
+            self.frame.set_chain(chain);
         }
     }
 

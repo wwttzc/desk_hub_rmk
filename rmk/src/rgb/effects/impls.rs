@@ -1159,7 +1159,7 @@ pub fn raindrops_color(config: &RgbConfig, rng: &mut Rng) -> Rgb {
 /// The trigger tests `params.iter == 0`, so it fires once per frame rather than
 /// once per batch. `index` is QMK's `static uint16_t index`: it selects the LED
 /// to repaint and is parked out of range until the next trigger.
-pub fn raindrops<const LED_COUNT: usize, F: LedFrame>(
+pub fn raindrops<const LED_COUNT: usize, F: LedFrame + crate::rgb::runner::FrameAll + crate::rgb::runner::FrameChain>(
     ctx: &RenderContext<'_, LED_COUNT>,
     params: &EffectParams,
     rng: &mut Rng,
@@ -1176,18 +1176,22 @@ pub fn raindrops<const LED_COUNT: usize, F: LedFrame>(
 
     let (led_min, led_max) = params.limits(ctx.process_limit, LED_COUNT);
     if params.init {
-        // Blank the chain before seeding it. Only the LEDs this effect owns are
-        // repainted afterwards, so without the clear the rest would keep the
-        // previous effect's colour and only ever flicker rather than change.
-        for i in 0..LED_COUNT {
-            frame.set_color(i, Rgb::BLACK);
-        }
-        for i in led_min..led_max {
-            if !has_any_flags(ctx.leds.flags(i as usize), params.flags) {
-                continue;
+        // Seed the whole chain, not just this batch's slice of it.
+        //
+        // `init` is driven by the effect change, which happens once per frame and
+        // therefore fires while `iter == 0`; the batches after the first never see
+        // it. Seeding only `led_min..led_max` left every later batch black until
+        // the repaint walk reached it — one LED per trigger — so the effect filled
+        // in slowly from one end instead of starting as a full field of specks.
+        // This also replaces whatever the previous effect left behind, which is
+        // what makes the switch land on black rather than on stale colours.
+        let mut lit = [Rgb::BLACK; LED_COUNT];
+        for (i, slot) in lit.iter_mut().enumerate() {
+            if has_any_flags(ctx.leds.flags(i), params.flags) {
+                *slot = raindrops_color(ctx.config, rng);
             }
-            frame.set_color(i as usize, raindrops_color(ctx.config, rng));
         }
+        frame.set_chain(&lit);
     } else if led_min as u16 <= *index && *index < led_max as u16 {
         if has_any_flags(ctx.leds.flags(*index as usize), params.flags) {
             frame.set_color(*index as usize, raindrops_color(ctx.config, rng));

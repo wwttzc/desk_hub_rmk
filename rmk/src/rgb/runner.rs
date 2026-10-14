@@ -127,6 +127,13 @@ impl<const LED_COUNT: usize> FrameAll for ArrayFrame<LED_COUNT> {
     }
 }
 
+impl<const LED_COUNT: usize> FrameChain for ArrayFrame<LED_COUNT> {
+    fn set_chain(&mut self, chain: &[Rgb]) {
+        assert_eq!(chain.len(), LED_COUNT, "the chain slice must have LED_COUNT entries");
+        self.pixels.copy_from_slice(chain);
+    }
+}
+
 impl<const LED_COUNT: usize> crate::rgb::engine::LedDriver for ArrayFrame<LED_COUNT> {
     async fn flush(&mut self) {
         // The pixels are already in memory; a real driver would shift them out.
@@ -401,6 +408,16 @@ pub fn rgb_matrix_none<F: LedFrame + FrameAll>(params: &EffectParams, frame: &mu
 /// `rgb_matrix_set_color_all`, needed by [`rgb_matrix_none`].
 pub trait FrameAll {
     fn set_all(&mut self, rgb: Rgb);
+}
+
+/// A frame that can be filled from a whole-chain slice at once.
+///
+/// An effect whose `init` pass must cover every LED cannot express that with
+/// [`LedFrame::set_color`] alone, because it is only called for LEDs inside the
+/// current batch. This is the "write every LED, whatever the batch" path.
+pub trait FrameChain {
+    /// Replace the whole chain with `chain`.
+    fn set_chain(&mut self, chain: &[Rgb]);
 }
 
 /// `point[i] - center`, in the signed form the C promotes to.

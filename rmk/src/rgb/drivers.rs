@@ -31,7 +31,7 @@ use smart_leds_trait::{RGB8, SmartLedsWrite};
 
 use super::engine::LedDriver;
 use super::fx::color::Rgb;
-use super::runner::{FrameAll, LedFrame};
+use super::runner::{FrameAll, FrameChain, LedFrame};
 
 /// A frame buffer backed by a `smart-leds` driver.
 ///
@@ -75,6 +75,13 @@ impl<const LED_COUNT: usize, D> LedFrame for SmartLedsFrame<LED_COUNT, D> {
 impl<const LED_COUNT: usize, D> FrameAll for SmartLedsFrame<LED_COUNT, D> {
     fn set_all(&mut self, rgb: Rgb) {
         self.pixels = [rgb; LED_COUNT];
+    }
+}
+
+impl<const LED_COUNT: usize, D> FrameChain for SmartLedsFrame<LED_COUNT, D> {
+    fn set_chain(&mut self, chain: &[Rgb]) {
+        assert_eq!(chain.len(), LED_COUNT, "the chain slice must have LED_COUNT entries");
+        self.pixels.copy_from_slice(chain);
     }
 }
 
