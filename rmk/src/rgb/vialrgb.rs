@@ -293,12 +293,13 @@ pub fn apply_set(state: &mut super::shared::SharedRgbState, request: Request) ->
 /// Stored as HSV because that is what the wire carries, and because the final
 /// value must be clamped to the board's brightness ceiling on the way in (as
 /// `fast_set_leds` does) rather than on the way out.
+///
+/// The authoritative copy lives in [`super::shared`], which is where the host
+/// service writes and the engine reads; this is the engine's own snapshot of it,
+/// refreshed once per tick.
 #[derive(Clone, Debug)]
 pub struct DirectColors<const LED_COUNT: usize> {
     hsv: [(u8, u8, u8); LED_COUNT],
-    /// True once the host has written at least one pixel, so the engine knows to
-    /// render from this buffer instead of an effect.
-    active: bool,
 }
 
 impl<const LED_COUNT: usize> Default for DirectColors<LED_COUNT> {
@@ -311,26 +312,7 @@ impl<const LED_COUNT: usize> DirectColors<LED_COUNT> {
     pub const fn new() -> Self {
         Self {
             hsv: [(0, 0, 0); LED_COUNT],
-            active: false,
         }
-    }
-
-    /// Record one LED's colour, clamping the value as `fast_set_leds` does.
-    pub fn set(&mut self, index: usize, h: u8, s: u8, v: u8, max_brightness: u8) {
-        self.hsv[index] = (h, s, v.min(max_brightness));
-        self.active = true;
-    }
-
-    /// Whether the host has written any pixel since construction.
-    #[inline]
-    pub const fn is_active(&self) -> bool {
-        self.active
-    }
-
-    /// Forget the host's pixels, returning to effect rendering.
-    pub fn clear(&mut self) {
-        self.hsv = [(0, 0, 0); LED_COUNT];
-        self.active = false;
     }
 
     /// One LED's stored HSV.
@@ -341,14 +323,18 @@ impl<const LED_COUNT: usize> DirectColors<LED_COUNT> {
 
     /// The buffer as two disjoint halves, for a bulk copy.
     ///
-    /// [`super::shared`] holds the same pixels in a fixed [`MAX_LEDS`] array
-    /// rather than this board's `LED_COUNT`, so the copy is expressed as two
-    /// slices the caller passes down.
+    /// [`super::shared`] holds the same pixels in a fixed `MAX_LEDS` array rather
+    /// than this board's `LED_COUNT`, so the copy is expressed as two slices the
+    /// caller passes down.
     #[inline]
-    pub fn halves_mut(&mut self) -> (&mut [(u8, u8, u8)], &mut [(u8, u8, u8)]) {
+    pub fn halves_mut(&mut self) -> (DirectColorsHalf<'_>, DirectColorsHalf<'_>) {
         self.hsv.split_at_mut(LED_COUNT / 2)
     }
 }
+
+/// One half of a [`DirectColors`] buffer, as passed to
+/// [`super::shared::copy_direct_colors`].
+pub type DirectColorsHalf<'a> = &'a mut [(u8, u8, u8)];
 
 #[cfg(test)]
 mod tests {
@@ -599,17 +585,15 @@ mod tests {
     }
 
     #[test]
-    fn direct_colors_clamp_brightness_and_track_activation() {
+    fn direct_colors_start_black_and_hold_what_was_copied_in() {
         let mut colors = DirectColors::<N>::new();
-        assert!(!colors.is_active());
-
-        colors.set(0, 10, 20, 255, 128);
-        assert!(colors.is_active());
-        assert_eq!(colors.get(0), (10, 20, 128), "value clamped to the ceiling");
-
-        colors.clear();
-        assert!(!colors.is_active());
         assert_eq!(colors.get(0), (0, 0, 0));
+
+        let (first, second) = colors.halves_mut();
+        first[0] = (10, 20, 30);
+        second[0] = (40, 50, 60);
+        assert_eq!(colors.get(0), (10, 20, 30));
+        assert_eq!(colors.get(N / 2), (40, 50, 60));
     }
 
     /// A shared state whose pixels are meaningful, standing in for the one the

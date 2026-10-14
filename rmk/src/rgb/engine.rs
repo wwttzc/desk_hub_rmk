@@ -154,16 +154,14 @@ pub struct RgbEngine<const LED_COUNT: usize, F: FrameBuffer> {
     /// QMK keeps this inside the effect; the engine is where cross-frame effect
     /// state lives here, because the effect itself is a free function.
     pixel_rain_wait: u32,
-    /// `g_rgb_frame_buffer`: per-matrix-cell state for the two framebuffer
-    /// effects. QMK guards it behind `RGB_MATRIX_FRAMEBUFFER_EFFECTS`; the rows
-    /// and columns are the board's electrical matrix, taken from `keyboard.toml`.
-    frame_buf: super::effects::impls::MatrixFrame<6, 4>,
-    /// `DIGITAL_RAIN`'s `static uint8_t drop`.
-    digital_rain_drop: u8,
-    /// `PIXEL_FRACTAL`'s `static bool led[MATRIX_ROWS][MID_COL]`.
-    fractal: super::effects::impls::FractalBits,
-    /// `PIXEL_FRACTAL`'s `static uint32_t wait_timer`.
-    fractal_wait: u32,
+    /// The cross-frame state the framebuffer effects keep: QMK's
+    /// `g_rgb_frame_buffer`, `DIGITAL_RAIN`'s `drop`/`decay`, `PIXEL_FRACTAL`'s
+    /// `led`/`wait_timer` and `TYPING_HEATMAP`'s decrease timer.
+    ///
+    /// QMK keeps these in `static` locals inside each effect. They travel as one
+    /// value because the effect functions are free functions and the dispatch
+    /// signature already carries several pieces of per-effect state.
+    framebuffer: super::effects::impls::FramebufferEffects,
     /// `g_direct_mode_colors`: per-LED colours the host set directly.
     direct: super::vialrgb::DirectColors<LED_COUNT>,
     frame: F,
@@ -197,10 +195,7 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
             rng: Rng::new(),
             raindrops_index: u16::MAX,
             pixel_rain_wait: 0,
-            frame_buf: super::effects::impls::MatrixFrame::new(),
-            digital_rain_drop: 0,
-            fractal: super::effects::impls::FractalBits::new(),
-            fractal_wait: 0,
+            framebuffer: super::effects::impls::FramebufferEffects::new(),
             direct: super::vialrgb::DirectColors::new(),
             frame,
             ctx: FrameContext::default(),
@@ -350,7 +345,7 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
         // copied for the others.
         if mode == registry::TYPING_HEATMAP {
             let cells = super::shared::with_state(|s| *s.heat().cells());
-            self.frame_buf.set_cells(&cells);
+            self.framebuffer.heat.set_cells(&cells);
         }
     }
 
@@ -425,7 +420,12 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
             EFFECT_OFF
         };
 
-        self.ctx.params.flags = self.config.flags;
+        // `rgb_task_render` clears the frame when the flag filter moves, so an
+        // LED the new filter excludes does not keep the previous frame's colour.
+        if self.ctx.params.flags != self.config.flags {
+            self.ctx.params.flags = self.config.flags;
+            self.frame.set_all(super::fx::color::Rgb::BLACK);
+        }
         self.state = TaskState::Rendering;
     }
 
@@ -442,7 +442,7 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
         // there is no per-LED work to spread out.
         if effect == super::vialrgb::DIRECT_MODE {
             self.render_direct();
-            self.ctx.params.iter = self.ctx.params.iter.saturating_add(1);
+            self.ctx.params.iter = self.ctx.params.iter.wrapping_add(1);
             self.ctx.last_effect = effect;
             self.ctx.last_enable = self.config.enable;
             self.state = TaskState::Flushing;
@@ -460,10 +460,7 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
             rng,
             raindrops_index,
             pixel_rain_wait,
-            frame_buf,
-            digital_rain_drop,
-            fractal,
-            fractal_wait,
+            framebuffer,
             frame,
             ctx,
             process_limit,
@@ -476,23 +473,22 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
             &RenderContext {
                 leds,
                 config,
-                    center: self.center,
-                    time: *timer_ms,
-                    process_limit: *process_limit,
-                },
-                &ctx.params,
-                hits,
-                rng,
-                raindrops_index,
-                pixel_rain_wait,
-                frame_buf,
-                digital_rain_drop,
-                fractal,
-                fractal_wait,
-                frame,
-            );
+                center: self.center,
+                time: *timer_ms,
+                process_limit: *process_limit,
+            },
+            &ctx.params,
+            hits,
+            rng,
+            raindrops_index,
+            pixel_rain_wait,
+            framebuffer,
+            frame,
+        );
 
-        self.ctx.params.iter = self.ctx.params.iter.saturating_add(1);
+        // `rgb_effect_params.iter++` on a `uint8_t`: it wraps, and the effect's
+        // `limits()` call already handles a wrapped `iter` as an empty batch.
+        self.ctx.params.iter = self.ctx.params.iter.wrapping_add(1);
 
         if !more {
             self.ctx.last_effect = effect;
@@ -827,6 +823,36 @@ mod tests {
             assert_eq!(engine.frame.frame.pixels[0], hsv_to_rgb(Hsv::new(10, 200, 100)));
             assert_eq!(engine.frame.frame.pixels[1], hsv_to_rgb(Hsv::new(200, 50, 80)));
             assert_eq!(engine.frame.frame.pixels[2], Rgb::BLACK, "untouched LEDs stay dark");
+        });
+    }
+
+    /// Moving the LED flag filter clears the frame, as QMK's `rgb_task_render`
+    /// does. Without it a LED the new filter excludes keeps the previous frame's
+    /// colour and the filter looks like it did nothing.
+    #[test]
+    fn changing_the_flag_filter_clears_the_frame() {
+        run(async {
+            let mut config = RgbConfig::default();
+            config.set_hsv(0, 255, 255, 255);
+            config.set_mode(2, EFFECT_MAX);
+            let mut engine = engine(config);
+
+            // Start with the full chain lit.
+            run_frame(&mut engine).await;
+            assert_ne!(engine.frame.frame.pixels[0], Rgb::BLACK, "lit before the filter moves");
+
+            // Narrow the filter to one this all-keylight table does not carry, so
+            // SOLID_COLOR draws nothing and the frame must come back black.
+            crate::rgb::shared::with_state(|s| {
+                s.config_mut().flags = super::super::led_config::LED_FLAG_INDICATOR;
+            });
+            engine.advance_time(LED_FLUSH_LIMIT_MS * 2);
+            run_frame(&mut engine).await;
+            assert_eq!(
+                engine.frame.frame.pixels,
+                [Rgb::BLACK; N],
+                "the moved filter cleared the frame"
+            );
         });
     }
 

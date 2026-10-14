@@ -13,7 +13,7 @@ use crate::rgb::fx::color::{hsv_to_rgb, Hsv, Rgb};
 use crate::rgb::fx::math8::{abs8, qadd8, qsub8, scale8, scale16by8, sqrt16};
 use crate::rgb::fx::random8::Rng;
 use crate::rgb::fx::trig8::{atan2_8, sin8};
-use crate::rgb::led_config::{has_any_flags, has_flags, LED_FLAG_MODIFIER};
+use crate::rgb::led_config::{has_any_flags, has_flags, LedInfo, LedPoint, LED_FLAG_MODIFIER};
 use crate::rgb::runner::{EffectParams, LedFrame, RenderContext};
 use crate::rgb::state::RgbConfig;
 
@@ -296,6 +296,19 @@ pub fn hue_wave_math(hsv: Hsv, x: u8, time: u8) -> Hsv {
     hsv.with_h(hsv.h.wrapping_add(scale8(wave, HUEDELTA)))
 }
 
+/// `DUAL_BEACON_math`: two hue gradients sweeping in from opposite corners.
+///
+/// The same shape as [`rainbow_beacon_math`] but **without** the `* 2` factor on
+/// the two position terms, so the pattern is a half-turn wider. `cos` is again
+/// the runner's first positional argument, which QMK's parameter list names
+/// `sin`.
+pub fn dual_beacon_math(hsv: Hsv, cos: i8, sin: i8, x: u8, y: u8, center_x: u8, center_y: u8) -> Hsv {
+    let term_y = (y as i16 - center_y as i16) * cos as i16;
+    let term_x = (x as i16 - center_x as i16) * sin as i16;
+    let delta = ((term_y + term_x) / 128) as i8;
+    hsv.with_h(hsv.h.wrapping_add(delta as u8))
+}
+
 /// `RAINBOW_BEACON_math`: a hue gradient rotating around the centre.
 ///
 /// The C computes this in `int` and assigns back to a `u8`, so the intermediate
@@ -548,6 +561,11 @@ pub struct MatrixFrame<const ROWS: usize, const COLS: usize> {
 }
 
 impl<const ROWS: usize, const COLS: usize> MatrixFrame<ROWS, COLS> {
+    /// Rows of the electrical matrix, QMK's `MATRIX_ROWS`.
+    pub const ROWS: usize = ROWS;
+    /// Columns of the electrical matrix, QMK's `MATRIX_COLS`.
+    pub const COLS: usize = COLS;
+
     pub const fn new() -> Self {
         Self {
             cells: [[0; COLS]; ROWS],
@@ -600,50 +618,62 @@ impl<const ROWS: usize, const COLS: usize> Default for MatrixFrame<ROWS, COLS> {
     }
 }
 
-/// `process_rgb_matrix_typing_heatmap`: heat the hit cell and its neighbours.
+/// `RGB_MATRIX_TYPING_HEATMAP_INCREASE_STEP` in QMK's coordinate space.
+const HEATMAP_INCREASE_STEP: u8 = 32;
+/// `RGB_MATRIX_TYPING_HEATMAP_DECREASE_DELAY_MS`.
+pub const HEATMAP_DECREASE_DELAY_MS: u32 = 25;
+/// `RGB_MATRIX_TYPING_HEATMAP_SPREAD`, in LED coordinate units (0..=224).
+const HEATMAP_SPREAD: u8 = 40;
+/// `RGB_MATRIX_TYPING_HEATMAP_AREA_LIMIT`.
+const HEATMAP_AREA_LIMIT: u8 = 16;
+
+/// `process_rgb_matrix_typing_heatmap`: heat the hit key and every key whose LED
+/// sits within `RGB_MATRIX_TYPING_HEATMAP_SPREAD` of it.
 ///
-/// The C warms the centre by 32, the four orthogonal neighbours by 16 and the
-/// four diagonals by 13. Adding 1 to the coordinates makes the edges wrap to 0
-/// and fail the bounds test rather than underflowing — the `wrapping_add` here
-/// is what preserves that.
+/// The spread is measured in LED coordinates rather than in matrix steps, so the
+/// heat follows the physical layout: a key diagonally adjacent on a wide board
+/// is further away than one directly beside it. The pressed key always heats
+/// itself, whatever the layout.
 pub fn typing_heatmap_record<const ROWS: usize, const COLS: usize>(
     frame: &mut MatrixFrame<ROWS, COLS>,
+    leds: &[LedInfo],
     row: u8,
     col: u8,
 ) {
-    let (row, col) = (row as usize, col as usize);
-    let (m_row, m_col) = (row.wrapping_sub(1), col.wrapping_sub(1));
-    let (p_row, p_col) = (row + 1, col + 1);
-    let has_prev_col = m_col < col;
-    let has_next_col = p_col < COLS;
-    let has_prev_row = m_row < row;
-    let has_next_row = p_row < ROWS;
+    let at = |row: u8, col: u8| -> Option<LedPoint> {
+        leds.iter()
+            .find(|info| info.matrix_pos == Some((row, col)))
+            .map(|info| info.point)
+    };
+    let Some(origin) = at(row, col) else {
+        // A pressed key with no LED under it contributes nothing, as QMK's
+        // `matrix_co[row][col] == NO_LED` early return does.
+        return;
+    };
 
-    if has_prev_col {
-        frame.add(row, m_col, 16);
-    }
-    frame.add(row, col, 32);
-    if has_next_col {
-        frame.add(row, p_col, 16);
-    }
+    // QMK's `LED_DISTANCE`: the same `sqrt16` the distance-based effects use, so
+    // the spread is measured in LED coordinate units, not matrix steps.
+    let distance = |point: LedPoint| {
+        let (dx, dy) = (
+            point.x as i32 - origin.x as i32,
+            point.y as i32 - origin.y as i32,
+        );
+        sqrt16((dx * dx + dy * dy) as u16)
+    };
 
-    if has_next_row {
-        if has_prev_col {
-            frame.add(p_row, m_col, 13);
-        }
-        frame.add(p_row, col, 16);
-        if has_next_col {
-            frame.add(p_row, p_col, 13);
-        }
-    }
-
-    if has_prev_row {
-        if has_prev_col {
-            frame.add(m_row, m_col, 13);
-        }
-        frame.add(m_row, col, 16);
-        if has_next_col {
-            frame.add(m_row, p_col, 13);
+    for i_row in 0..ROWS {
+        for i_col in 0..COLS {
+            let Some(point) = at(i_row as u8, i_col as u8) else {
+                continue;
+            };
+            if i_row as u8 == row && i_col as u8 == col {
+                frame.add(i_row, i_col, HEATMAP_INCREASE_STEP);
+                continue;
+            }
+            let distance = distance(point);
+            if distance <= HEATMAP_SPREAD {
+                frame.add(i_row, i_col, qsub8(HEATMAP_SPREAD, distance).min(HEATMAP_AREA_LIMIT));
+            }
         }
     }
 }
@@ -660,11 +690,13 @@ pub fn typing_heatmap_color(val: u8, sat: u8, max_val: u8) -> Rgb {
 ///
 /// The walk is over *matrix cells*, not LEDs, and a cell maps to its LED through
 /// the table's electrical position, so an unpopulated cell simply lights
-/// nothing. Every visited cell cools by one per frame.
+/// nothing. A cell cools once every [`HEATMAP_DECREASE_DELAY_MS`], not once per
+/// frame, which is what makes the fade speed independent of the frame rate.
 pub fn typing_heatmap<const LED_COUNT: usize, F: LedFrame>(
     ctx: &RenderContext<'_, LED_COUNT>,
     params: &EffectParams,
     frame_buf: &mut MatrixFrame<6, 4>,
+    timer: &mut DecreaseTimer,
     frame: &mut F,
 ) -> bool {
     const ROWS: usize = 6;
@@ -682,6 +714,21 @@ pub fn typing_heatmap<const LED_COUNT: usize, F: LedFrame>(
         return false;
     }
 
+    // `heatmap_decrease_timer` marks the last decrease, so the elapsed test is
+    // against that rather than against the frame start.
+    let due = ctx.time.wrapping_sub(timer.last) >= HEATMAP_DECREASE_DELAY_MS;
+    // The frame may run in several batches, so only the first one arms the timer;
+    // the rest of the frame reuses the decision it made.
+    let decrease = if params.iter == 0 {
+        timer.due = due;
+        if due {
+            timer.last = ctx.time;
+        }
+        due
+    } else {
+        timer.due
+    };
+
     let cells = ROWS * COLS;
     let per_batch = ctx.process_limit.max(1);
     let start = per_batch * params.iter as usize;
@@ -689,6 +736,12 @@ pub fn typing_heatmap<const LED_COUNT: usize, F: LedFrame>(
     if start >= cells {
         return false;
     }
+
+    // QMK batches over LEDs, not cells: an LED outside the current batch is
+    // skipped before its cell is rendered, and the cell's heat survives because
+    // it was never processed. Walking cells but painting only the LEDs inside
+    // the batch keeps both halves of that behaviour.
+    let (led_min, led_max) = params.limits(ctx.process_limit, LED_COUNT);
 
     for i in start..end {
         let row = i % ROWS;
@@ -699,13 +752,21 @@ pub fn typing_heatmap<const LED_COUNT: usize, F: LedFrame>(
         let mut leds = [0u8; 8];
         let count = ctx.leds.leds_at(row as u8, col as u8, &mut leds);
         let rgb = typing_heatmap_color(val, ctx.config.hsv.s, ctx.config.hsv.v);
+        let mut processed = false;
         for &led in &leds[..count] {
-            if has_any_flags(ctx.leds.flags(led as usize), params.flags) {
-                frame.set_color(led as usize, rgb);
+            if (led as usize) < led_min as usize || (led as usize) >= led_max as usize {
+                continue;
             }
+            if !has_any_flags(ctx.leds.flags(led as usize), params.flags) {
+                continue;
+            }
+            frame.set_color(led as usize, rgb);
+            processed = true;
         }
 
-        frame_buf.decay(row, col);
+        if processed && decrease {
+            frame_buf.decay(row, col);
+        }
     }
 
     end < cells
@@ -713,17 +774,26 @@ pub fn typing_heatmap<const LED_COUNT: usize, F: LedFrame>(
 
 /// `DIGITAL_RAIN`'s colour for one cell: a dim green ramp, saturating to white
 /// at the head of a droplet.
-pub fn digital_rain_color(intensity: u8) -> Rgb {
-    const PURE_GREEN_INTENSITY: u8 = 0xd0;
-    const MAX_BRIGHTNESS_BOOST: u8 = 0xc0;
-    const MAX_INTENSITY: u8 = 0xff;
+///
+/// The three levels all derive from the configured brightness, as QMK's do, so
+/// the effect follows the value slider and `max_brightness` instead of pinning
+/// itself to full scale.
+///
+/// The divisions are computed in `u32` and narrowed last, because the C carries
+/// them in `int` and only truncates on assignment to the `uint8_t` channel.
+/// `intensity` is never above `max_intensity` on a real frame — a droplet is
+/// spawned at the ceiling and only ever decays from it — so the quotient fits a
+/// byte and the narrowing is exact.
+pub fn digital_rain_color(intensity: u8, max_intensity: u8) -> Rgb {
+    let pure_green_intensity = ((max_intensity as u32) * 3 / 4) as u8;
+    let max_brightness_boost = ((max_intensity as u32) * 3 / 4) as u8;
 
-    if intensity > PURE_GREEN_INTENSITY {
-        let boost = (MAX_BRIGHTNESS_BOOST as u16 * (intensity - PURE_GREEN_INTENSITY) as u16
-            / (MAX_INTENSITY - PURE_GREEN_INTENSITY) as u16) as u8;
-        Rgb::new(boost, MAX_INTENSITY, boost)
+    if intensity > pure_green_intensity {
+        let boost = ((max_brightness_boost as u32 * (intensity - pure_green_intensity) as u32)
+            / (max_intensity - pure_green_intensity) as u32) as u8;
+        Rgb::new(boost, max_intensity, boost)
     } else {
-        let green = (MAX_INTENSITY as u16 * intensity as u16 / PURE_GREEN_INTENSITY as u16) as u8;
+        let green = ((max_intensity as u32 * intensity as u32) / pure_green_intensity as u32) as u8;
         Rgb::new(0, green, 0)
     }
 }
@@ -732,22 +802,34 @@ pub fn digital_rain_color(intensity: u8) -> Rgb {
 ///
 /// The whole grid is walked every frame — unlike the heat map, this effect does
 /// not batch — and a column's fall advances once every `DROP_TICKS` frames.
-/// `drop` is QMK's `static uint8_t drop`, carried here so it survives the call.
-pub fn digital_rain<const LED_COUNT: usize, F: LedFrame>(
+/// `drop` and `decay` are QMK's two `static` counters, carried here so they
+/// survive the call.
+pub fn digital_rain<const LED_COUNT: usize, F: LedFrame + crate::rgb::runner::FrameAll>(
     ctx: &RenderContext<'_, LED_COUNT>,
     params: &EffectParams,
     frame_buf: &mut MatrixFrame<6, 4>,
     rng: &mut Rng,
     drop: &mut u8,
+    decay: &mut u8,
     frame: &mut F,
 ) -> bool {
     const ROWS: usize = 6;
     const COLS: usize = 4;
     const DROP_TICKS: u8 = 28;
-    const MAX_INTENSITY: u8 = 0xff;
     /// `RGB_DIGITAL_RAIN_DROPS`, the 1-in-N chance of a new droplet per column
     /// per frame. Lower is denser.
-    const DROPS: u16 = 24;
+    const DROPS: u8 = 24;
+
+    // `max_intensity` is the configured brightness, so a dimmer setting both
+    // shortens the trail (`decay_ticks`) and scales every colour.
+    let max_intensity = ctx.config.hsv.v;
+    if max_intensity == 0 {
+        // The division below would be a divide by zero; a black chain is the
+        // only thing a zero brightness can render anyway.
+        frame.set_all(Rgb::BLACK);
+        return false;
+    }
+    let decay_ticks = 0xff / max_intensity;
 
     if params.init {
         frame_buf.clear();
@@ -755,47 +837,56 @@ pub fn digital_rain<const LED_COUNT: usize, F: LedFrame>(
         for i in 0..LED_COUNT {
             frame.set_color(i, Rgb::BLACK);
         }
-        return false;
     }
 
-    // Diagnostic: count where droplets are actually spawned.
-    static SPAWNED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    *decay = decay.wrapping_add(1);
+
     for col in 0..COLS {
         for row in 0..ROWS {
-            let cell = frame_buf.get(row, col);
-            if row == 0 && *drop == 0 && rng.next8_max(DROPS as u8) == 0 {
+            // The two branches are QMK's: a spawning column is skipped for
+            // decay, everything else that is mid-fade loses one step per
+            // `decay_ticks` frames.
+            if row == 0 && *drop == 0 && rng.next8_max(DROPS) == 0 {
                 // A fresh droplet starts at the top of this column.
-                frame_buf.set(row, col, MAX_INTENSITY);
-            } else if cell > 0 && cell < MAX_INTENSITY {
+                frame_buf.set(row, col, max_intensity);
+            } else if *decay == decay_ticks
+                && frame_buf.get(row, col) > 0
+                && frame_buf.get(row, col) < max_intensity
+            {
                 frame_buf.decay(row, col);
             }
 
             let mut leds = [0u8; 8];
             let count = ctx.leds.leds_at(row as u8, col as u8, &mut leds);
-            if count > 0 {
-                // QMK lights only `led[0]` here; multiple LEDs on one cell are
-                // still a TODO upstream.
-                let led = leds[0];
+            let rgb = digital_rain_color(frame_buf.get(row, col), max_intensity);
+            for &led in &leds[..count] {
                 if has_any_flags(ctx.leds.flags(led as usize), params.flags) {
-                    frame.set_color(led as usize, digital_rain_color(frame_buf.get(row, col)));
+                    frame.set_color(led as usize, rgb);
                 }
             }
         }
     }
 
-    *drop += 1;
+    if *decay == decay_ticks {
+        *decay = 0;
+    }
+
+    *drop = drop.wrapping_add(1);
     if *drop > DROP_TICKS {
         *drop = 0;
         // Advance every droplet one row downward, bottom row first so a cell is
-        // not overwritten before it has been read.
+        // not overwritten before it has been read. The comparison is `>=`
+        // because a cell can sit above `max_intensity` if the value slider was
+        // lowered while a droplet was falling.
         for row in (1..ROWS).rev() {
             for col in 0..COLS {
-                if row == ROWS - 1 && frame_buf.get(row, col) == MAX_INTENSITY {
+                if row == ROWS - 1 && frame_buf.get(row, col) == max_intensity {
                     frame_buf.decay(row, col);
                 }
-                if frame_buf.get(row - 1, col) == MAX_INTENSITY {
-                    frame_buf.decay(row - 1, col);
-                    frame_buf.set(row, col, MAX_INTENSITY);
+                if frame_buf.get(row - 1, col) >= max_intensity {
+                    // The old head keeps a one-step trail rather than vanishing.
+                    frame_buf.set(row - 1, col, max_intensity - 1);
+                    frame_buf.set(row, col, max_intensity);
                 }
             }
         }
@@ -804,61 +895,107 @@ pub fn digital_rain<const LED_COUNT: usize, F: LedFrame>(
     false
 }
 
+/// A mirror of QMK's `static bool decrease_heatmap_values`, tracked alongside
+/// the timer so the later batches of a frame reuse the first batch's decision.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DecreaseTimer {
+    /// `heatmap_decrease_timer`: the clock at the last decrease.
+    pub last: u32,
+    /// Whether the current frame cools the grid.
+    pub due: bool,
+}
+
+/// The cross-frame state the framebuffer effects keep.
+///
+/// QMK keeps each piece in a `static` local inside its effect. Bundling them
+/// keeps the engine's struct and the dispatch signature from growing a field per
+/// effect, and keeps `FractalBits` sized by the same matrix the frame buffer is.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FramebufferEffects {
+    /// `g_rgb_frame_buffer`: `TYPING_HEATMAP`'s heat.
+    pub heat: MatrixFrame<6, 4>,
+    /// `DIGITAL_RAIN`'s `static uint8_t drop`.
+    pub digital_rain_drop: u8,
+    /// `DIGITAL_RAIN`'s `static uint8_t decay`.
+    pub digital_rain_decay: u8,
+    /// `PIXEL_FRACTAL`'s `static bool led[MATRIX_ROWS][MID_COL]`.
+    pub fractal: FractalBits,
+    /// `PIXEL_FRACTAL`'s `static uint32_t wait_timer`.
+    pub fractal_wait: u32,
+    /// `TYPING_HEATMAP`'s decrease timer and its per-frame decision.
+    pub heatmap: DecreaseTimer,
+}
+
+impl FramebufferEffects {
+    pub const fn new() -> Self {
+        Self {
+            heat: MatrixFrame::new(),
+            digital_rain_drop: 0,
+            digital_rain_decay: 0,
+            fractal: FractalBits::new(),
+            fractal_wait: 0,
+            heatmap: DecreaseTimer {
+                last: 0,
+                due: false,
+            },
+        }
+    }
+}
+
 /// `PIXEL_FRACTAL`'s state: one bit per row pinning the column it was born in.
 ///
 /// QMK stores `bool led[MATRIX_ROWS][MID_COL]` and shifts each row left by one
 /// entry per tick, copying the value out to the mirrored column on the other
-/// side. A `u32` per row is the same thing with the mirroring done by bit
-/// position, which is what makes the pattern march outwards instead of
-/// scrolling.
+/// side. A bit per entry is the same thing without the `bool` array, and the
+/// length is derived from the matrix rather than written down twice.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FractalBits {
+    /// Row `r`'s occupied columns, bit `c` for `MID_COL` entry `c`.
     rows: [u32; 6],
 }
 
 impl FractalBits {
-    /// `MID_COL`, QMK's `MATRIX_COLS / 2`, floored at 1.
-    const MID_COL: usize = 2;
+    /// `MATRIX_ROWS`, matching the frame buffer's own rows.
     const ROWS: usize = 6;
+    /// `MATRIX_COLS`, matching the frame buffer's own columns.
+    const COLS: usize = 4;
+    /// `MID_COL`, QMK's `(MATRIX_COLS + 1) / 2`.
+    const MID_COL: usize = Self::COLS.div_ceil(2);
 
     pub const fn new() -> Self {
         Self { rows: [0; 6] }
     }
 
-    /// Whether row `row`'s newest column is lit.
+    /// Whether row `row`'s entry `index` is lit, counting from the middle out.
     #[inline]
-    fn head(&self, row: usize) -> bool {
-        self.rows[row] & 1 != 0
+    fn lit(&self, row: usize, index: usize) -> bool {
+        self.rows[row] >> index & 1 != 0
     }
 
-    /// Whether the entry `l` places from the left edge is lit.
-    #[inline]
-    fn lit(&self, row: usize, l: usize) -> bool {
-        self.rows[row] >> l & 1 != 0
-    }
-
-    fn set_head(&mut self, row: usize, lit: bool) {
-        if lit {
-            self.rows[row] |= 1;
-        } else {
-            self.rows[row] &= !1;
-        }
-    }
-
-    fn shift_in(&mut self, row: usize, lit: bool) {
-        self.rows[row] = (self.rows[row] << 1) | lit as u32;
+    /// Replace the row's entries with one fresh head, QMK's
+    /// `memmove(led[row], led[row] + 1, ...)` plus the new `random8() & 3`.
+    fn advance(&mut self, row: usize, head: bool) {
+        let mask = (1u32 << Self::MID_COL) - 1;
+        self.rows[row] = ((self.rows[row] << 1) | head as u32) & mask;
     }
 
     fn clear(&mut self) {
         self.rows = [0; 6];
     }
+
+    /// `MATRIX_COLS - 1 - col`, the column mirroring `col` about the centre.
+    #[inline]
+    const fn mirror(col: usize) -> usize {
+        Self::COLS - 1 - col
+    }
 }
 
 /// `PIXEL_FRACTAL`: a fractal pattern growing outwards from the middle columns.
 ///
-/// Every tick shifts each row one column further from the centre and copies the
-/// value to the mirrored column, so a cell lights on both sides at once. A new
-/// random head is drawn only when the timer fires.
+/// The row advances only on the frame's last batch, but *every* batch paints its
+/// own LEDs, because a batch is a slice of the chain rather than of the matrix.
+/// Advancing on the first batch instead would leave the later batches to be
+/// skipped by the timer check, and the LEDs they own would never be written.
 pub fn pixel_fractal<const LED_COUNT: usize, F: LedFrame>(
     ctx: &RenderContext<'_, LED_COUNT>,
     params: &EffectParams,
@@ -879,35 +1016,49 @@ pub fn pixel_fractal<const LED_COUNT: usize, F: LedFrame>(
         return false;
     }
 
-    if ctx.time <= *wait_timer {
-        return false;
-    }
+    let (led_min, led_max) = params.limits(ctx.process_limit, LED_COUNT);
+    // `rgb_matrix_check_finished_leds`: this call is the frame's last batch, so
+    // it is the one allowed to advance the pattern.
+    let last_batch = !ctx.more_batches(led_max);
 
+    // The pattern is painted on *every* call, whether or not the timer has fired.
+    // QMK's `if (g_rgb_timer > wait_timer)` wraps the paint loop as well, but it
+    // also paints every LED in one call; with batching, skipping the paint would
+    // leave the LEDs owned by this batch holding whatever the previous frame put
+    // there, and nothing would ever come back for them.
     let lit = hsv_to_rgb(ctx.config.hsv);
     for row in 0..ROWS {
-        // Columns `l` and `COLS - 1 - l` mirror each other.
-        for l in 0..MID_COL - 1 {
-            let on = bits.lit(row, l);
-            let value = if on { lit } else { Rgb::BLACK };
-            paint_cell(ctx, params, frame, row, l, value);
-            paint_cell(ctx, params, frame, row, COLS - 1 - l, value);
-            // Shift this row along, pulling in the next column's bit.
-            let next = bits.lit(row, l + 1);
-            bits.rows[row] = (bits.rows[row] & !(1 << l)) | ((next as u32) << l);
+        for index in 0..MID_COL {
+            let value = if bits.lit(row, index) { lit } else { Rgb::BLACK };
+            // QMK writes the left LED first and then the mirror, skipping the
+            // mirror when the two name the same LED.
+            let left = col_for(index);
+            let right = FractalBits::mirror(left);
+            paint_cell(ctx, params, frame, led_min, led_max, row, left, value);
+            if right != left {
+                paint_cell(ctx, params, frame, led_min, led_max, row, right, value);
+            }
         }
-
-        // The middle pair shares the head bit.
-        let on = bits.head(row);
-        let value = if on { lit } else { Rgb::BLACK };
-        paint_cell(ctx, params, frame, row, MID_COL - 1, value);
-        paint_cell(ctx, params, frame, row, COLS - MID_COL, value);
-
-        // A new random head: `(random8() & 3) ? false : true`, so one in four.
-        bits.set_head(row, rng.next8() & 3 == 0);
     }
 
-    *wait_timer = ctx.time.wrapping_add(pixel_fractal_interval(ctx.config.speed));
-    false
+    if last_batch && ctx.time > *wait_timer {
+        for row in 0..ROWS {
+            // `(random8() & 3) ? false : true`, so a new head appears one frame
+            // in four. The bits are shifted in together with that head, which is
+            // what marches the pattern outward from the middle.
+            bits.advance(row, rng.next8() & 3 == 0);
+        }
+        *wait_timer = ctx.time.wrapping_add(pixel_fractal_interval(ctx.config.speed));
+    }
+
+    !last_batch
+}
+
+/// The matrix column `MID_COL` entry `index` occupies, counting from the middle
+/// out towards the left edge.
+#[inline]
+const fn col_for(index: usize) -> usize {
+    FractalBits::MID_COL - 1 - index
 }
 
 /// `PIXEL_FRACTAL`'s tick interval in milliseconds, from the configured speed.
@@ -915,11 +1066,19 @@ pub fn pixel_fractal_interval(speed: u8) -> u32 {
     3000 / scale16by8(qadd8(speed, 16) as u16, 16) as u32
 }
 
-/// Light the LED at electrical `(row, col)`, if the board has one there.
+/// Light the LED at electrical `(row, col)`, if the board has one there and it
+/// falls inside the current batch.
+///
+/// A board with an LED outside the key matrix (underglow, say) can map it to no
+/// cell at all; this is the reverse direction, a cell with no LED under it, and
+/// it simply draws nothing.
+#[allow(clippy::too_many_arguments)]
 fn paint_cell<const LED_COUNT: usize, F: LedFrame>(
     ctx: &RenderContext<'_, LED_COUNT>,
     params: &EffectParams,
     frame: &mut F,
+    led_min: u8,
+    led_max: u8,
     row: usize,
     col: usize,
     rgb: Rgb,
@@ -927,6 +1086,9 @@ fn paint_cell<const LED_COUNT: usize, F: LedFrame>(
     let mut leds = [0u8; 8];
     let count = ctx.leds.leds_at(row as u8, col as u8, &mut leds);
     for &led in &leds[..count] {
+        if (led as usize) < led_min as usize || (led as usize) >= led_max as usize {
+            continue;
+        }
         if has_any_flags(ctx.leds.flags(led as usize), params.flags) {
             frame.set_color(led as usize, rgb);
         }
@@ -1128,7 +1290,7 @@ mod tests {
         let scale = scale8(64, config.speed);
         for i in 0..N {
             let x = leds.point(i).x;
-            let shift = (scale as u16 * x as u16 >> 5) as u8;
+            let shift = ((scale as u16 * x as u16) >> 5) as u8;
             assert_eq!(
                 frame.pixels[i],
                 hsv_to_rgb(config.hsv.with_h(config.hsv.h.wrapping_add(shift))),
@@ -1488,12 +1650,15 @@ mod tests {
     /// the engine's signal that this is the first frame of the effect.
     #[test]
     fn typing_heatmap_starts_cold_on_selection() {
-        use crate::rgb::led_config::{LedConfig, LedPoint};
+        use crate::rgb::led_config::{LedInfo, LedPoint};
 
         let leds = Box::leak(Box::new(LedConfig::from_matrix(
             [LedPoint::new(0, 0); 2],
             [(0, 0), (1, 1)],
         )));
+        // The heat recorder reads the flattened table the shared state keeps.
+        let table: Vec<LedInfo> = (0..2).map(|i| leds.info(i)).collect();
+
         let config = RgbConfig::with_defaults(true, 100, 200, 128, 0xFF, 255);
         let ctx = RenderContext {
             leds,
@@ -1505,13 +1670,14 @@ mod tests {
 
         // Presses before the effect is selected leave heat behind.
         let mut frame_buf = MatrixFrame::<6, 4>::new();
-        typing_heatmap_record(&mut frame_buf, 0, 0);
+        typing_heatmap_record(&mut frame_buf, &table, 0, 0);
         assert!(frame_buf.get(0, 0) > 0, "the press heated the cell");
 
         // The first frame of the effect clears it.
         let params = EffectParams { iter: 0, flags: 0xFF, init: true };
+        let mut timer = DecreaseTimer::default();
         let mut frame = ArrayFrame::<2>::new();
-        typing_heatmap(&ctx, &params, &mut frame_buf, &mut frame);
+        typing_heatmap(&ctx, &params, &mut frame_buf, &mut timer, &mut frame);
 
         for row in 0..6 {
             for col in 0..4 {
@@ -1566,6 +1732,7 @@ mod tests {
         let mut rng = Rng::with_seed(2024);
         let mut frame_buf = MatrixFrame::<6, 4>::new();
         let mut drop = 0u8;
+        let mut decay = 0u8;
         let mut lit_cols = [false; 4];
 
         for frame in 0..4000u32 {
@@ -1582,7 +1749,15 @@ mod tests {
                 init: frame == 0,
             };
             let mut frame_buf_out = ArrayFrame::<N>::new();
-            digital_rain(&ctx, &params, &mut frame_buf, &mut rng, &mut drop, &mut frame_buf_out);
+            digital_rain(
+                &ctx,
+                &params,
+                &mut frame_buf,
+                &mut rng,
+                &mut drop,
+                &mut decay,
+                &mut frame_buf_out,
+            );
 
             for (i, &(_, col)) in POS.iter().enumerate() {
                 let p = frame_buf_out.pixels[i];
@@ -1602,6 +1777,370 @@ mod tests {
         );
     }
 
+    /// The two beacons are distinct effects, not aliases: `DUAL_BEACON` omits the
+    /// `* 2` on the position terms, so at the same position and phase they shift
+    /// the hue by different amounts.
+    #[test]
+    fn dual_beacon_is_twice_as_coarse_as_rainbow_beacon() {
+        let hsv = Hsv::new(0, 255, 255);
+        let (cos, sin) = (100i8, 100i8);
+        // Both terms are non-zero and `dx == 0`, so the sine term alone decides.
+        let dual = dual_beacon_math(hsv, cos, sin, 224, 32, 112, 32);
+        let rainbow = rainbow_beacon_math(hsv, cos, sin, 224, 32, 112, 32);
+        assert_ne!(dual.h, rainbow.h, "the two beacons must not be the same effect");
+        assert_eq!(dual.h, ((112 * 100) / 128) as u8);
+        assert_eq!(rainbow.h, ((112 * 2 * 100) / 128) as i8 as u8);
+        // A centred LED has no offset in either.
+        assert_eq!(dual_beacon_math(hsv, cos, sin, 112, 32, 112, 32).h, 0);
+    }
+
+    /// Every LED the key matrix can address must be reachable by the effect.
+    ///
+    /// These are the real 19 positions, and `col_for` / `mirror` between them
+    /// must cover all four columns of a row that has one.
+    #[test]
+    fn fractal_columns_cover_the_whole_row() {
+        let covered: Vec<usize> = (0..FractalBits::MID_COL)
+            .flat_map(|index| {
+                let left = col_for(index);
+                let right = FractalBits::mirror(left);
+                if right == left { vec![left] } else { vec![left, right] }
+            })
+            .collect();
+        let unique: std::collections::BTreeSet<usize> = covered.iter().copied().collect();
+        assert_eq!(
+            unique,
+            (0..FractalBits::COLS).collect(),
+            "columns reachable by index 0..MID_COL, got {covered:?}"
+        );
+    }
+
+    /// `PIXEL_FRACTAL` must write *every* LED over a full wait period, not just
+    /// the ones in the frame's first batch.
+    ///
+    /// The row only advances on the last batch, but each batch paints its own
+    /// LEDs; getting that backwards leaves everything past the first batch stale,
+    /// which is what a "only four LEDs move" report looks like on hardware.
+    #[test]
+    fn pixel_fractal_paints_every_led_across_a_frames_batches() {
+        use crate::rgb::led_config::{LedConfig, LedPoint};
+        use std::collections::BTreeSet;
+
+        // The real 19-position numpad, so the batch slicing lands on the LED
+        // indices a board would have.
+        const POS: [(u8, u8); 19] = [
+            (0, 0),
+            (0, 1),
+            (1, 0),
+            (1, 1),
+            (1, 2),
+            (1, 3),
+            (2, 0),
+            (2, 1),
+            (2, 2),
+            (3, 0),
+            (3, 1),
+            (3, 2),
+            (3, 3),
+            (4, 0),
+            (4, 1),
+            (4, 2),
+            (5, 0),
+            (5, 2),
+            (5, 3),
+        ];
+        const N: usize = POS.len();
+
+        let mut points = [LedPoint::new(0, 0); N];
+        let mut matrix = [(0u8, 0u8); N];
+        for (i, &(row, col)) in POS.iter().enumerate() {
+            points[i] = LedPoint::new(col * 44, row * 44);
+            matrix[i] = (row, col);
+        }
+        let leds = Box::leak(Box::new(LedConfig::from_matrix(points, matrix)));
+
+        /// Records which LED indices an effect actually wrote.
+        #[derive(Default)]
+        struct Tracker {
+            written: Vec<usize>,
+        }
+
+        impl LedFrame for Tracker {
+            fn set_color(&mut self, index: usize, _rgb: Rgb) {
+                self.written.push(index);
+            }
+        }
+
+        // 19 LEDs at QMK's default process limit of 4: five batches per frame.
+        // `init` is per *frame*, not per batch, so it is consumed once below and
+        // the batches that follow it are the ones this test is about.
+        let config = RgbConfig::with_defaults(true, 100, 200, 128, 0xFF, 255);
+        let mut rng = Rng::with_seed(99);
+        let mut bits = FractalBits::new();
+        let mut wait = 0u32;
+        let mut painted: BTreeSet<usize> = BTreeSet::new();
+
+        let ctx = RenderContext {
+            leds,
+            config: &config,
+            center: RenderContext::<N>::DEFAULT_CENTER,
+            time: 1000,
+            process_limit: 4,
+        };
+
+        // The init pass clears the chain, reports completion and leaves the timer
+        // alone; it owns no batches.
+        let mut frame = Tracker::default();
+        assert!(
+            !pixel_fractal(
+                &ctx,
+                &EffectParams {
+                    iter: 0,
+                    flags: 0xFF,
+                    init: true
+                },
+                &mut bits,
+                &mut rng,
+                &mut wait,
+                &mut frame
+            ),
+            "the init pass is a single call"
+        );
+        assert_eq!(wait, 0, "the timer is untouched while initialising");
+
+        // One frame, walked batch by batch exactly as the engine walks it.
+        let mut iter = 0u8;
+        let mut batches = 0;
+        loop {
+            let params = EffectParams {
+                iter,
+                flags: 0xFF,
+                init: false,
+            };
+            let mut frame = Tracker::default();
+            let more = pixel_fractal(&ctx, &params, &mut bits, &mut rng, &mut wait, &mut frame);
+            painted.extend(frame.written);
+
+            batches += 1;
+            if !more {
+                break;
+            }
+            iter += 1;
+            assert!(iter < 16, "batching must terminate");
+        }
+
+        assert!(batches > 1, "19 LEDs at 4 per batch is a multi-batch frame, got {batches}");
+        let missing: Vec<usize> = (0..N).filter(|i| !painted.contains(i)).collect();
+        assert!(
+            missing.is_empty(),
+            "every LED must be written in some batch; missing {missing:?} at positions {:?}",
+            missing.iter().map(|&i| POS[i]).collect::<Vec<_>>()
+        );
+    }
+
+    /// The pattern marches one entry per *frame*, not one per batch.
+    ///
+    /// A row's head is only re-rolled when the frame's last batch renders, so a
+    /// five-batch frame advances the pattern once.
+    #[test]
+    fn pixel_fractal_advances_once_per_frame_and_only_on_the_last_batch() {
+        use crate::rgb::led_config::{LedConfig, LedPoint};
+        use crate::rgb::runner::ArrayFrame;
+
+        let leds = LedConfig::from_matrix(
+            [
+                LedPoint::new(0, 0),
+                LedPoint::new(44, 0),
+                LedPoint::new(88, 0),
+                LedPoint::new(132, 0),
+                LedPoint::new(176, 0),
+                LedPoint::new(220, 0),
+            ],
+            [(0, 0), (0, 1), (0, 2), (0, 3), (1, 0), (1, 1)],
+        );
+        let config = RgbConfig::with_defaults(true, 100, 200, 128, 0xFF, 255);
+        let mut rng = Rng::with_seed(7);
+        let mut bits = FractalBits::new();
+        let mut wait = 0u32;
+        let mut frames_advanced = 0;
+
+        for frame in 0..8u32 {
+            let ctx = RenderContext {
+                leds: &leds,
+                config: &config,
+                center: RenderContext::<6>::DEFAULT_CENTER,
+                time: 1000 + frame * 10_000,
+                process_limit: 2,
+            };
+            // Snapshot the wait timer: only the frame's last batch may move it.
+            let before = wait;
+            let mut armed_on: Option<u8> = None;
+            let mut iter = 0u8;
+            let mut batches = 0;
+            loop {
+                let params = EffectParams {
+                    iter,
+                    flags: 0xFF,
+                    init: false,
+                };
+                let mut frame = ArrayFrame::<6>::new();
+                let more = pixel_fractal(&ctx, &params, &mut bits, &mut rng, &mut wait, &mut frame);
+                if wait != before {
+                    assert!(armed_on.is_none(), "the timer was re-armed twice in one frame");
+                    armed_on = Some(iter);
+                }
+                batches += 1;
+                if !more {
+                    break;
+                }
+                iter += 1;
+            }
+
+            if let Some(iter) = armed_on {
+                frames_advanced += 1;
+                // Six LEDs at two per batch: the last batch is index 2. Arming on
+                // any earlier batch would leave the later LEDs unpainted.
+                assert_eq!(iter, batches - 1, "the timer moved before the last batch");
+            }
+        }
+
+        assert_eq!(frames_advanced, 8, "each frame of the walk should advance the pattern");
+    }
+
+    /// `DIGITAL_RAIN`'s scale follows the configured brightness: a lower value
+    /// dims the whole effect rather than only the global scale.
+    #[test]
+    fn digital_rain_colours_follow_the_configured_brightness() {
+        // QMK: max_intensity = v, pure_green = boost = 3v/4, so a head at the
+        // maximum intensity is `(3v/4, v, 3v/4)` — `3 * 255 >> 2 == 191`.
+        let bright = digital_rain_color(255, 255);
+        assert_eq!(bright, Rgb::new(191, 255, 191));
+
+        let dim = digital_rain_color(100, 100);
+        assert_eq!(dim, Rgb::new(75, 100, 75), "the whole head follows the ceiling down");
+
+        // The green ramp below the threshold is `v * intensity / (3v/4)`, which
+        // cancels to `4 * intensity / 3`: the same at either ceiling, because the
+        // pure-green reference scales with the brightness too.
+        assert_eq!(digital_rain_color(51, 255).g, 68);
+        assert_eq!(digital_rain_color(51, 100).g, 68);
+
+        // At the threshold the boost is zero, so the head is pure green.
+        assert_eq!(digital_rain_color(191, 255).r, 0);
+        assert_eq!(digital_rain_color(75, 100).r, 0);
+    }
+
+    /// The heat spread is measured in LED coordinates, not matrix steps: a key
+    /// further than `RGB_MATRIX_TYPING_HEATMAP_SPREAD` away is left cold, and one
+    /// inside it is warmed by `spread - distance`.
+    #[test]
+    fn typing_heatmap_spreads_by_distance_not_by_matrix_adjacency() {
+        use crate::rgb::led_config::{LedConfig, LedInfo, LedPoint};
+
+        // Three keys in one row, 40 units apart. The spread is 40, so the near
+        // neighbour (40 away) is at the limit and the far one (80 away) is out.
+        let leds = LedConfig::from_matrix(
+            [
+                LedPoint::new(0, 0),
+                LedPoint::new(40, 0),
+                LedPoint::new(80, 0),
+            ],
+            [(0, 0), (0, 1), (0, 2)],
+        );
+        let table: Vec<LedInfo> = (0..3).map(|i| leds.info(i)).collect();
+
+        let mut frame = MatrixFrame::<6, 4>::new();
+        typing_heatmap_record(&mut frame, &table, 0, 0);
+
+        assert_eq!(frame.get(0, 0), 32, "the pressed key takes the full step");
+        assert_eq!(frame.get(0, 1), 0, "a neighbour exactly at the spread adds nothing");
+        assert_eq!(frame.get(0, 2), 0, "a key beyond the spread is never warmed");
+
+        // A closer neighbour is warmed by `spread - distance`, capped at 16.
+        let closer = LedConfig::from_matrix(
+            [LedPoint::new(0, 0), LedPoint::new(10, 0)],
+            [(0, 0), (0, 1)],
+        );
+        let closer_table: Vec<LedInfo> = (0..2).map(|i| closer.info(i)).collect();
+        let mut frame = MatrixFrame::<6, 4>::new();
+        typing_heatmap_record(&mut frame, &closer_table, 0, 0);
+        assert_eq!(frame.get(0, 1), 16, "qsub8(40, 10) caps at the area limit");
+
+        // A key with no LED under it records nothing at all.
+        let mut frame = MatrixFrame::<6, 4>::new();
+        typing_heatmap_record(&mut frame, &table, 5, 3);
+        assert_eq!(frame.get(5, 3), 0);
+    }
+
+    /// A cell cools once per `HEATMAP_DECREASE_DELAY_MS`, not once per call.
+    #[test]
+    fn typing_heatmap_cools_on_the_decrease_delay_not_every_frame() {
+        use crate::rgb::led_config::{LedConfig, LedPoint};
+
+        let leds = LedConfig::from_matrix([LedPoint::new(0, 0)], [(0, 0)]);
+        let config = RgbConfig::with_defaults(true, 100, 200, 128, 0xFF, 255);
+        let mut frame_buf = MatrixFrame::<6, 4>::new();
+        frame_buf.set(0, 0, 100);
+        let mut timer = DecreaseTimer::default();
+        let params = EffectParams { iter: 0, flags: 0xFF, init: false };
+        let mut frame = ArrayFrame::<1>::new();
+
+        let ctx_at = |time| RenderContext {
+            leds: &leds,
+            config: &config,
+            center: RenderContext::<1>::DEFAULT_CENTER,
+            time,
+            process_limit: 1,
+        };
+
+        // Same millisecond: the delay has not elapsed, so the cell holds.
+        typing_heatmap(&ctx_at(0), &params, &mut frame_buf, &mut timer, &mut frame);
+        assert_eq!(frame_buf.get(0, 0), 100, "no cooling inside the delay");
+
+        // The delay after the last decrease: the cell cools by one.
+        typing_heatmap(&ctx_at(HEATMAP_DECREASE_DELAY_MS), &params, &mut frame_buf, &mut timer, &mut frame);
+        assert_eq!(frame_buf.get(0, 0), 99, "cooled once the delay elapsed");
+        assert_eq!(timer.last, HEATMAP_DECREASE_DELAY_MS, "the timer restarts on a decrease");
+
+        // A frame inside the new delay leaves it alone.
+        typing_heatmap(
+            &ctx_at(HEATMAP_DECREASE_DELAY_MS + 1),
+            &params,
+            &mut frame_buf,
+            &mut timer,
+            &mut frame,
+        );
+        assert_eq!(frame_buf.get(0, 0), 99, "not cooled again immediately");
+    }
+
+    /// A zero brightness must not divide by zero, and must render dark.
+    #[test]
+    fn digital_rain_with_zero_brightness_is_black_and_does_not_panic() {
+        use crate::rgb::led_config::{LedConfig, LedPoint};
+        use crate::rgb::runner::ArrayFrame;
+
+        let leds = LedConfig::from_matrix([LedPoint::new(0, 0)], [(0, 0)]);
+        let config = RgbConfig::with_defaults(true, 100, 200, 128, 0xFF, 0);
+        let ctx = RenderContext {
+            leds: &leds,
+            config: &config,
+            center: RenderContext::<1>::DEFAULT_CENTER,
+            time: 100,
+            process_limit: 1,
+        };
+        let mut rng = Rng::with_seed(1);
+        let mut frame_buf = MatrixFrame::<6, 4>::new();
+        let mut drop = 0u8;
+        let mut decay = 0u8;
+        let mut frame = ArrayFrame::<1>::new();
+        frame.fill(Rgb::WHITE);
+
+        let params = EffectParams { iter: 0, flags: 0xFF, init: false };
+        digital_rain(&ctx, &params, &mut frame_buf, &mut rng, &mut drop, &mut decay, &mut frame);
+        assert_eq!(frame.pixels[0], Rgb::BLACK);
+    }
+
+    /// A `FrameAll` frame, so `digital_rain`'s zero-brightness path compiles.
     #[test]
     fn reactive_simple_clamps_the_offset_before_decaying() {
         let hsv = Hsv::new(0, 255, 255);

@@ -306,20 +306,22 @@ impl SharedRgbState {
     /// `led_count == 0` early path — the LED table is the only place that knows
     /// which electrical positions carry a light.
     pub fn record_key_press(&mut self, row: u8, col: u8) {
-        // The flattened table is indexed by LED chain position, and a linear scan
-        // over it is the same order `LedConfig::led_at` walks — there are tens of
-        // LEDs, and this runs on a key press rather than per frame.
-        let Some(index) = (0..self.led_count as usize).find(|&i| self.leds[i].matrix_pos == Some((row, col)))
-        else {
-            return;
-        };
-        let info = self.leds[index];
-        if self.pending_hits.push(PendingHit {
-            x: info.point.x,
-            y: info.point.y,
-            index: index as u8,
-        }) {
-            self.dropped_hits = self.dropped_hits.saturating_add(1);
+        let table = &self.leds[..self.led_count as usize];
+        // Every LED under the position is remembered, not just the first: a key
+        // lit from both sides has two, and the engine's own tracker records both.
+        // `matrix_pos` is `None` on an unpopulated tail slot, so the scan cannot
+        // match a position the board never wired.
+        for (index, info) in table.iter().enumerate() {
+            if info.matrix_pos != Some((row, col)) {
+                continue;
+            }
+            if self.pending_hits.push(PendingHit {
+                x: info.point.x,
+                y: info.point.y,
+                index: index as u8,
+            }) {
+                self.dropped_hits = self.dropped_hits.saturating_add(1);
+            }
         }
 
         // QMK warms the heat map only for the effect that reads it, so a press
@@ -328,7 +330,7 @@ impl SharedRgbState {
             && (row as usize) < MATRIX_ROWS
             && (col as usize) < MATRIX_COLS
         {
-            super::effects::impls::typing_heatmap_record(&mut self.heat, row, col);
+            super::effects::impls::typing_heatmap_record(&mut self.heat, table, row, col);
         }
     }
 
@@ -606,6 +608,26 @@ mod tests {
         // `led_count == 0` path does.
         s.record_key_press(0, 0);
         assert_eq!(s.pending_hits().len(), 1, "unmapped press is ignored");
+    }
+
+    /// A key lit from both sides has two LEDs, and every one of them is
+    /// remembered — the same set the engine's own tracker records, so the two
+    /// halves of the reactive path cannot disagree about a press.
+    #[test]
+    fn a_press_records_every_led_under_the_position() {
+        let mut s = SharedRgbState::new();
+        s.set_leds(&LedConfig::new(
+            [LedPoint::new(10, 20), LedPoint::new(10, 30)],
+            [LED_FLAG_KEYLIGHT; 2],
+            [(0, 0), (0, 0)],
+        ));
+
+        s.record_key_press(0, 0);
+        let pending = s.pending_hits();
+        assert_eq!(pending.len(), 2, "both LEDs under the key are recorded");
+        assert_eq!(pending[0].index, 0);
+        assert_eq!(pending[1].index, 1);
+        assert_eq!((pending[0].x, pending[1].y), (10, 30));
     }
 
     #[test]

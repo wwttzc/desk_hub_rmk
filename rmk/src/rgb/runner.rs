@@ -490,8 +490,9 @@ mod tests {
 
     #[test]
     fn the_default_limit_batches_a_long_chain() {
-        // QMK's default is (LED_COUNT + 4) / 5.
-        let process_limit = (LEDS + 4) / 5; // 2
+        // QMK's default is (LED_COUNT + 4) / 5, which `default_process_limit`
+        // spells as `div_ceil`.
+        let process_limit = LEDS.div_ceil(5); // 2
         assert_eq!(limits(0, process_limit, LEDS), (0, 2));
         assert_eq!(limits(3, process_limit, LEDS), (6, 8));
         assert_eq!(limits(4, process_limit, LEDS), (8, 8));

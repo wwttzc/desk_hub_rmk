@@ -251,10 +251,7 @@ pub fn dispatch<const LED_COUNT: usize, F: LedFrame + FrameAll>(
     rng: &mut Rng,
     raindrops_index: &mut u16,
     pixel_rain_wait: &mut u32,
-    frame_buf: &mut impls::MatrixFrame<6, 4>,
-    digital_rain_drop: &mut u8,
-    fractal: &mut impls::FractalBits,
-    fractal_wait: &mut u32,
+    framebuffer: &mut impls::FramebufferEffects,
     frame: &mut F,
 ) -> bool {
     use crate::rgb::fx::math8::qsub8;
@@ -303,7 +300,7 @@ pub fn dispatch<const LED_COUNT: usize, F: LedFrame + FrameAll>(
 
         21 => r::effect_runner_sin_cos_i(ctx, params, frame, |hsv, cos, sin, i, _t| {
             let p = ctx.leds.point(i as usize);
-            rainbow_beacon_math(hsv, cos, sin, p.x, p.y, ctx.center.x, ctx.center.y)
+            dual_beacon_math(hsv, cos, sin, p.x, p.y, ctx.center.x, ctx.center.y)
         }),
 
         22 => r::effect_runner_sin_cos_i(ctx, params, frame, |hsv, cos, sin, i, _t| {
@@ -327,8 +324,16 @@ pub fn dispatch<const LED_COUNT: usize, F: LedFrame + FrameAll>(
         // The two framebuffer effects walk the electrical matrix rather than the
         // LED chain, so they read and write `frame_buf` instead of batching over
         // LEDs. `TYPING_HEATMAP` still batches, cell by cell.
-        29 => typing_heatmap(ctx, params, frame_buf, frame),
-        30 => digital_rain(ctx, params, frame_buf, rng, digital_rain_drop, frame),
+        29 => typing_heatmap(ctx, params, &mut framebuffer.heat, &mut framebuffer.heatmap, frame),
+        30 => digital_rain(
+            ctx,
+            params,
+            &mut framebuffer.heat,
+            rng,
+            &mut framebuffer.digital_rain_drop,
+            &mut framebuffer.digital_rain_decay,
+            frame,
+        ),
 
         31 => r::effect_runner_reactive(ctx, params, hits, frame, solid_reactive_simple_math),
         32 => r::effect_runner_reactive(ctx, params, hits, frame, solid_reactive_math),
@@ -367,7 +372,14 @@ pub fn dispatch<const LED_COUNT: usize, F: LedFrame + FrameAll>(
 
         43 => pixel_rain(ctx, params, rng, pixel_rain_wait, frame),
 
-        44 => pixel_fractal(ctx, params, fractal, rng, fractal_wait, frame),
+        44 => pixel_fractal(
+            ctx,
+            params,
+            &mut framebuffer.fractal,
+            rng,
+            &mut framebuffer.fractal_wait,
+            frame,
+        ),
 
         // In the table but not ported yet. Keep the frame coherent; the
         // build-time check reports it.
@@ -609,10 +621,7 @@ mod tests {
                     let mut rng = Rng::with_seed(1337);
                     let mut raindrops_index = u16::MAX;
                     let mut pixel_rain_wait = 0u32;
-                    let mut frame_buf = impls::MatrixFrame::<6, 4>::new();
-                    let mut digital_rain_drop = 0u8;
-                    let mut fractal = impls::FractalBits::new();
-                    let mut fractal_wait = 0u32;
+                    let mut frame_buf = impls::FramebufferEffects::new();
                     let mut frame = ArrayFrame::<N>::new();
 
                     // Walk the batches exactly as the engine will.
@@ -633,9 +642,6 @@ mod tests {
                             &mut raindrops_index,
                             &mut pixel_rain_wait,
                             &mut frame_buf,
-                            &mut digital_rain_drop,
-                            &mut fractal,
-                            &mut fractal_wait,
                             &mut frame,
                         );
                         guard += 1;
@@ -679,10 +685,7 @@ mod tests {
         let mut rng = Rng::with_seed(1);
         let mut index = u16::MAX;
         let mut wait = 0u32;
-        let mut frame_buf = impls::MatrixFrame::<6, 4>::new();
-        let mut drop = 0u8;
-        let mut fractal = impls::FractalBits::new();
-        let mut fractal_wait = 0u32;
+        let mut frame_buf = impls::FramebufferEffects::new();
         let mut frame = ArrayFrame::<2>::new();
         frame.fill(Rgb::WHITE);
 
@@ -700,9 +703,6 @@ mod tests {
             &mut index,
             &mut wait,
             &mut frame_buf,
-            &mut drop,
-            &mut fractal,
-            &mut fractal_wait,
             &mut frame
         ));
         assert_eq!(frame.pixels, [Rgb::BLACK; 2]);
