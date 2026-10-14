@@ -266,6 +266,18 @@ where
 ///
 /// `time` is 16-bit here (unlike the other runners) because it feeds `sin8`/
 /// `cos8`, which take a byte, and the runner passes the wide value through.
+///
+/// # The sin/cos naming trap
+///
+/// QMK's header declares the callback as `(hsv, int8_t sin, int8_t cos, ...)`
+/// but computes locals named `cos_value`/`sin_value` and calls
+/// `effect_func(hsv, cos_value, sin_value, ...)`. So the argument in the
+/// parameter position *named* `sin` is the **cosine**, and vice versa.
+///
+/// The effect bodies are ports of QMK's, which are written against the
+/// *positions*, so this runner reproduces the C's argument order exactly.
+/// "Fixing" the names by swapping the arguments silently swaps the two axes of
+/// every effect built on this runner.
 pub fn effect_runner_sin_cos_i<const LED_COUNT: usize, F, E>(
     ctx: &RenderContext<'_, LED_COUNT>,
     params: &EffectParams,
@@ -286,6 +298,7 @@ where
         if !led_selected(ctx, params, i) {
             continue;
         }
+        // `cos_value` first, exactly as the C call site does.
         let hsv = effect_func(ctx.config.hsv, cos_value, sin_value, i, time as u8);
         put(frame, i, hsv);
     }
@@ -668,13 +681,17 @@ mod tests {
         assert_eq!(dist, Some(5));
     }
 
-    /// QMK's own naming trap: `sin_cos_i_f` is declared as
-    /// `(hsv, int8_t sin, int8_t cos, ...)`, but every call site passes
-    /// `(hsv, cos_value, sin_value, ...)` — i.e. the first argument is the
-    /// **cosine**. Effects are written against the call order, so the runner
-    /// passes cosine first and this test pins that.
+    /// QMK's own naming trap, pinned here because getting it backwards swaps the
+    /// two axes of every `sin_cos_i` effect.
+    ///
+    /// `sin_cos_i_f` is declared `(hsv, int8_t sin, int8_t cos, ...)`, but the
+    /// runner body assigns `cos_value` and `sin_value` and then calls
+    /// `effect_func(hsv, cos_value, sin_value, ...)`. So the callee's parameter
+    /// named `sin` receives the **cosine** and the one named `cos` receives the
+    /// **sine**. This test pins the declared order, which is what the effect
+    /// bodies are written against.
     #[test]
-    fn runner_sin_cos_i_passes_cosine_first() {
+    fn runner_sin_cos_i_supplies_cosine_in_the_parameter_named_cos() {
         let leds = leds();
         let config = config();
         let ctx = ctx(&leds, &config, LEDS);
@@ -686,20 +703,33 @@ mod tests {
             flags: LED_FLAG_ALL,
             init: true,
         };
-        effect_runner_sin_cos_i(&ctx, &params, &mut frame, |_, first, second, _, _| {
-            pair = Some((first, second));
+        effect_runner_sin_cos_i(&ctx, &params, &mut frame, |_, first, second, _, time| {
+            pair = Some((first, second, time));
             Hsv::default()
         });
 
-        let (first, second) = pair.expect("the effect ran");
-        let time = scale16by8(ctx.time as u16, config.speed / 4) as u8;
+        // The runner supplies `(cos_value, sin_value)` in that order, so the
+        // parameter named `sin` holds the cosine. The names are the trap, so
+        // assert each holds the *other* value rather than the one it suggests.
+        let (first, second, time) = pair.expect("the effect ran");
+        // The runner computes its own time; recompute it so the expectation
+        // cannot drift from the implementation.
+        let t = scale16by8(ctx.time as u16, config.speed / 4);
+        assert_eq!(t as u8, time, "the effect saw the runner's own time");
 
-        assert_eq!(first, (cos8(time) as i16 - 128) as i8, "first argument is cosine");
-        assert_eq!(second, (sin8(time) as i16 - 128) as i8, "second is sine");
-        // Both are byte-derived and centred: -128..=127.
+        let cos_value = (cos8(t as u8) as i16 - 128) as i8;
+        let sin_value = (sin8(t as u8) as i16 - 128) as i8;
+        assert_ne!(cos_value, sin_value, "the pair must differ, or the test proves nothing");
+
+        // QMK's naming trap, pinned: the effect function declares
+        // `(..., int8_t sin, int8_t cos, ...)` but the runner passes the cosine
+        // first, so the parameter called `sin` receives the cosine. Effects are
+        // written against the *values*, which is why the ports match despite the
+        // misleading names.
+        assert_eq!(first, cos_value, "the first argument is the cosine");
+        assert_eq!(second, sin_value, "the second argument is the sine");
         assert!((-128..=127).contains(&first));
         assert!((-128..=127).contains(&second));
-        assert_ne!(first, second, "cosine and sine differ away from the axes");
     }
 
     #[test]

@@ -250,6 +250,7 @@ pub fn dispatch<const LED_COUNT: usize, F: LedFrame + FrameAll>(
     hits: &HitTracker,
     rng: &mut Rng,
     raindrops_index: &mut u16,
+    pixel_rain_index: &mut u8,
     pixel_rain_wait: &mut u32,
     framebuffer: &mut impls::FramebufferEffects,
     frame: &mut F,
@@ -315,7 +316,7 @@ pub fn dispatch<const LED_COUNT: usize, F: LedFrame + FrameAll>(
 
         24 => raindrops(ctx, params, rng, raindrops_index, frame),
 
-        25 => jellybean_raindrops(ctx, params, rng, frame),
+        25 => jellybean_raindrops(ctx, params, rng, raindrops_index, frame),
 
         26 => r::effect_runner_i(ctx, params, frame, hue_breathing_math),
         27 => r::effect_runner_i(ctx, params, frame, |hsv, i, t| hue_pendulum_math(hsv, x(i), t)),
@@ -370,7 +371,7 @@ pub fn dispatch<const LED_COUNT: usize, F: LedFrame + FrameAll>(
         }
         38 => r::effect_runner_reactive_splash(0, ctx, params, hits, frame, solid_reactive_nexus_math),
 
-        43 => pixel_rain(ctx, params, rng, pixel_rain_wait, frame),
+        43 => pixel_rain(ctx, params, rng, pixel_rain_index, pixel_rain_wait, frame),
 
         44 => pixel_fractal(
             ctx,
@@ -620,6 +621,7 @@ mod tests {
                 for entry in EFFECTS.iter() {
                     let mut rng = Rng::with_seed(1337);
                     let mut raindrops_index = u16::MAX;
+                    let mut pixel_rain_index = 0u8;
                     let mut pixel_rain_wait = 0u32;
                     let mut frame_buf = impls::FramebufferEffects::new();
                     let mut frame = ArrayFrame::<N>::new();
@@ -640,6 +642,7 @@ mod tests {
                             &hits,
                             &mut rng,
                             &mut raindrops_index,
+                            &mut pixel_rain_index,
                             &mut pixel_rain_wait,
                             &mut frame_buf,
                             &mut frame,
@@ -684,6 +687,7 @@ mod tests {
         let hits = HitTracker::new();
         let mut rng = Rng::with_seed(1);
         let mut index = u16::MAX;
+        let mut rain_index = 0u8;
         let mut wait = 0u32;
         let mut frame_buf = impls::FramebufferEffects::new();
         let mut frame = ArrayFrame::<2>::new();
@@ -701,6 +705,7 @@ mod tests {
             &hits,
             &mut rng,
             &mut index,
+            &mut rain_index,
             &mut wait,
             &mut frame_buf,
             &mut frame

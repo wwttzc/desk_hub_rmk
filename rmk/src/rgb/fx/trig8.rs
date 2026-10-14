@@ -43,7 +43,12 @@ pub const fn sin8(theta: u8) -> u8 {
         y = y.wrapping_neg();
     }
 
-    (y as i32 + 128) as u8
+    // `y += 128; return y;` where the function returns `uint8_t`, so the C wraps
+    // modulo 256. A Rust `as u8` cast on a negative value truncates instead, so
+    // `-128 + 128` would land on 0 rather than 128. `y + 128` is always
+    // non-negative for the inputs this table produces, so the wrap is defensive;
+    // spell it out rather than relying on that.
+    ((y as i32 + 128) as u32 & 0xFF) as u8
 }
 
 /// `cos8`: quarter-turn-shifted [`sin8`].

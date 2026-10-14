@@ -147,8 +147,13 @@ pub struct RgbEngine<const LED_COUNT: usize, F: FrameBuffer> {
     hits: HitTracker,
     /// The LCG shared by the random effects.
     rng: Rng,
-    /// `RAINDROPS`'s `static uint16_t index`.
+    /// `RAINDROPS`'s and `JELLYBEAN_RAINDROPS`'s `static uint16_t index`.
+    ///
+    /// QMK parks it past the end of the chain between triggers, which is what
+    /// limits a trigger to one repaint.
     raindrops_index: u16,
+    /// `PIXEL_RAIN`'s `static uint8_t index`: the LED its next cycle repaints.
+    pixel_rain_index: u8,
     /// `PIXEL_RAIN`'s `static uint32_t wait_timer`: when its next repaint is due.
     ///
     /// QMK keeps this inside the effect; the engine is where cross-frame effect
@@ -194,6 +199,7 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
             hits: HitTracker::new(),
             rng: Rng::new(),
             raindrops_index: u16::MAX,
+            pixel_rain_index: 0,
             pixel_rain_wait: 0,
             framebuffer: super::effects::impls::FramebufferEffects::new(),
             direct: super::vialrgb::DirectColors::new(),
@@ -459,6 +465,7 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
             hits,
             rng,
             raindrops_index,
+            pixel_rain_index,
             pixel_rain_wait,
             framebuffer,
             frame,
@@ -481,6 +488,7 @@ impl<const LED_COUNT: usize, F: FrameBuffer> RgbEngine<LED_COUNT, F> {
             hits,
             rng,
             raindrops_index,
+            pixel_rain_index,
             pixel_rain_wait,
             framebuffer,
             frame,

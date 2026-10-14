@@ -299,9 +299,11 @@ pub fn hue_wave_math(hsv: Hsv, x: u8, time: u8) -> Hsv {
 /// `DUAL_BEACON_math`: two hue gradients sweeping in from opposite corners.
 ///
 /// The same shape as [`rainbow_beacon_math`] but **without** the `* 2` factor on
-/// the two position terms, so the pattern is a half-turn wider. `cos` is again
-/// the runner's first positional argument, which QMK's parameter list names
-/// `sin`.
+/// the two position terms, so the pattern is a half-turn wider.
+///
+/// The parameters are named as QMK's effect declares them, `(sin, cos)`, even
+/// though the runner's first argument is the cosine — see
+/// [`effect_runner_sin_cos_i`](crate::rgb::runner::effect_runner_sin_cos_i).
 pub fn dual_beacon_math(hsv: Hsv, cos: i8, sin: i8, x: u8, y: u8, center_x: u8, center_y: u8) -> Hsv {
     let term_y = (y as i16 - center_y as i16) * cos as i16;
     let term_x = (x as i16 - center_x as i16) * sin as i16;
@@ -312,9 +314,7 @@ pub fn dual_beacon_math(hsv: Hsv, cos: i8, sin: i8, x: u8, y: u8, center_x: u8, 
 /// `RAINBOW_BEACON_math`: a hue gradient rotating around the centre.
 ///
 /// The C computes this in `int` and assigns back to a `u8`, so the intermediate
-/// is signed and the truncation applies to the whole expression. `cos` is the
-/// runner's **first** positional argument — QMK's parameter is named `sin`,
-/// which does not match its call sites.
+/// is signed and the truncation applies to the whole expression.
 pub fn rainbow_beacon_math(hsv: Hsv, cos: i8, sin: i8, x: u8, y: u8, center_x: u8, center_y: u8) -> Hsv {
     let term_y = (y as i16 - center_y as i16) * 2 * cos as i16;
     let term_x = (x as i16 - center_x as i16) * 2 * sin as i16;
@@ -326,15 +326,7 @@ pub fn rainbow_beacon_math(hsv: Hsv, cos: i8, sin: i8, x: u8, y: u8, center_x: u
 ///
 /// The x term folds about the centre (`56 - abs8(dx)`), which is what makes the
 /// two halves counter-rotate; `56` is 224/4, hard-coded in QMK.
-pub fn rainbow_pinwheels_math(
-    hsv: Hsv,
-    cos: i8,
-    sin: i8,
-    x: u8,
-    y: u8,
-    center_x: u8,
-    center_y: u8,
-) -> Hsv {
+pub fn rainbow_pinwheels_math(hsv: Hsv, cos: i8, sin: i8, x: u8, y: u8, center_x: u8, center_y: u8) -> Hsv {
     let term_y = (y as i16 - center_y as i16) * 3 * cos as i16;
     // The C subtracts two `uint8_t` and passes the wrapped result to `abs8`'s
     // `int8_t` parameter, so the subtraction has to wrap rather than overflow.
@@ -465,15 +457,27 @@ pub fn jellybean_raindrops_set_color(
 /// Differs from [`raindrops`] in two ways: the whole chain is randomised on the
 /// first frame, and the repaint picks a new LED outright instead of nudging the
 /// previous one's hue. The trigger is `% 5` where `RAINDROPS` uses `% 10`.
+///
+/// `index` is QMK's `static uint16_t index`, shared with [`raindrops`] because
+/// only one of the two can be the selected effect at a time. It is what limits a
+/// trigger to one repaint: the previous implementation fired on every batch that
+/// happened to land inside the `% 5` window, which re-rolled the LED several
+/// times per frame.
 #[allow(clippy::manual_is_multiple_of)]
 pub fn jellybean_raindrops<const LED_COUNT: usize, F: LedFrame>(
     ctx: &RenderContext<'_, LED_COUNT>,
     params: &EffectParams,
     rng: &mut Rng,
+    index: &mut u16,
     frame: &mut F,
 ) -> bool {
-    let (led_min, led_max) = params.limits(ctx.process_limit, LED_COUNT);
+    // The trigger tests `iter == 0`, so it fires once per frame rather than once
+    // per batch; the parked index is what makes that once per trigger.
+    if params.iter == 0 && scale16by8(ctx.time as u16, qadd8(ctx.config.speed, 16)) % 5 == 0 {
+        *index = rng.next8_max(LED_COUNT as u8) as u16;
+    }
 
+    let (led_min, led_max) = params.limits(ctx.process_limit, LED_COUNT);
     if params.init {
         for i in led_min..led_max {
             if !has_any_flags(ctx.leds.flags(i as usize), params.flags) {
@@ -481,58 +485,57 @@ pub fn jellybean_raindrops<const LED_COUNT: usize, F: LedFrame>(
             }
             jellybean_raindrops_set_color(i, ctx.config, rng, frame);
         }
-    } else if scale16by8(ctx.time as u16, qadd8(ctx.config.speed, 16)) % 5 == 0 {
-        let index = rng.next8_max(LED_COUNT as u8);
-        // The index draw happens before the colour draw, so the flag test has to
-        // come after it to keep the two effects' RNG sequences comparable.
-        if has_any_flags(ctx.leds.flags(index as usize), params.flags) {
-            jellybean_raindrops_set_color(index, ctx.config, rng, frame);
+    } else if led_min as u16 <= *index && *index < led_max as u16 {
+        if has_any_flags(ctx.leds.flags(*index as usize), params.flags) {
+            jellybean_raindrops_set_color(*index as u8, ctx.config, rng, frame);
         }
+        // Park the index until the next trigger.
+        *index = u16::MAX;
     }
 
     ctx.more_batches(led_max)
 }
 
-/// `PIXEL_RAIN`'s repaint interval in milliseconds, from the configured speed.
+/// `PIXEL_RAIN`'s cycle length in milliseconds, from the configured speed.
 ///
-/// `qadd8(speed, 16)` is at least 16, so the divisor can never be zero.
+/// QMK scales it between 256 ms and 2048 ms: `2048 - scale16by8(1792, speed)`.
+/// Faster means a *shorter* wait, which is what the subtraction expresses.
 pub fn pixel_rain_interval(speed: u8) -> u32 {
-    500 / scale16by8(qadd8(speed, 16) as u16, 16) as u32
+    2048 - scale16by8(1792, speed) as u32
 }
 
 /// `PIXEL_RAIN`: randomly blank or re-colour one LED at a time.
 ///
-/// The first draw decides between off and a random colour, so half the frames
+/// The first draw decides between off and a random colour, so half the cycles
 /// darken whatever LED they picked — that is what separates this from
 /// `JELLYBEAN_RAINDROPS`, which never turns an LED off.
 ///
-/// The effect paints at most one LED and finishes the frame either way, so it
-/// never asks for another batch: the batching loop is for effects that walk the
-/// chain, and this one is driven by its own timer instead.
+/// The whole repaint is gated on the timer, and the LED is only written by the
+/// batch that owns its index. The timer is rearmed and a fresh index drawn on
+/// the frame's **last** batch, which is where QMK does it, so the cadence does
+/// not depend on which batch the current index happens to fall into.
 pub fn pixel_rain<const LED_COUNT: usize, F: LedFrame>(
     ctx: &RenderContext<'_, LED_COUNT>,
     params: &EffectParams,
     rng: &mut Rng,
+    index: &mut u8,
     wait_timer: &mut u32,
     frame: &mut F,
 ) -> bool {
-    // QMK leaves a freshly selected effect painting onto the previous frame
-    // unless the effect clears it; this one has no `init` branch of its own, so
-    // seed the chain once rather than inheriting whatever was lit before.
-    if params.init {
-        let (led_min, led_max) = params.limits(ctx.process_limit, LED_COUNT);
-        for i in led_min..led_max {
-            if !has_any_flags(ctx.leds.flags(i as usize), params.flags) {
-                continue;
-            }
-            frame.set_color(i as usize, random_jellybean_color(ctx.config, rng));
-        }
-        return (led_max as usize) < LED_COUNT;
+    // `params->iter == 0 && params->init`: a fresh index on the first frame, so
+    // the first cycle has a target rather than the zero the field starts at.
+    if params.iter == 0 && params.init {
+        *index = rng.next8_max(LED_COUNT as u8);
     }
 
+    let (led_min, led_max) = params.limits(ctx.process_limit, LED_COUNT);
+    let last_batch = !ctx.more_batches(led_max);
+
     if ctx.time > *wait_timer {
-        let index = rng.next8_max(LED_COUNT as u8);
-        if has_any_flags(ctx.leds.flags(index as usize), params.flags) {
+        if led_min as u16 <= *index as u16
+            && (*index as u16) < led_max as u16
+            && has_any_flags(ctx.leds.flags(*index as usize), params.flags)
+        {
             // `(random8() & 2)` is the off/on coin flip; it is drawn either way,
             // so the branch must not skip it.
             let off = (rng.next8() & 2) != 0;
@@ -541,12 +544,18 @@ pub fn pixel_rain<const LED_COUNT: usize, F: LedFrame>(
             } else {
                 random_jellybean_color(ctx.config, rng)
             };
-            frame.set_color(index as usize, rgb);
+            frame.set_color(*index as usize, rgb);
+        }
+
+        if last_batch {
+            // The index and the timer both move on the final LED range, as QMK
+            // does, so a cycle advances even when its index carried no LED.
+            *index = rng.next8_max(LED_COUNT as u8);
             *wait_timer = ctx.time.wrapping_add(pixel_rain_interval(ctx.config.speed));
         }
     }
 
-    false
+    !last_batch
 }
 
 /// QMK's `g_rgb_frame_buffer`: one byte of persistent state per matrix cell.
@@ -1559,11 +1568,12 @@ mod tests {
 
     #[test]
     fn pixel_rain_interval_shrinks_as_speed_rises() {
-        // `500 / scale16by8(qadd8(speed,16),16)`: the divisor grows with speed, so
-        // a higher speed is a shorter wait.
+        // `2048 - scale16by8(1792, speed)`: the subtracted term grows with speed,
+        // so a higher speed is a shorter wait. QMK's own comment calls the range
+        // "256–2048 ms"; the truncation in `scale16by8` lands the top at 263.
         assert!(pixel_rain_interval(255) < pixel_rain_interval(0));
-        // `qadd8(speed, 16)` is never zero, so the interval is always defined.
-        assert!(pixel_rain_interval(0) > 0);
+        assert_eq!(pixel_rain_interval(0), 2048, "slowest");
+        assert_eq!(pixel_rain_interval(255), 263, "fastest");
     }
 
     #[test]
@@ -1584,15 +1594,83 @@ mod tests {
         };
         let run = EffectParams { iter: 0, flags: 0xFF, init: false };
         let mut frame = ArrayFrame::<2>::new();
+        let mut index = 0u8;
 
         // Armed at 1000: a tick that has not passed it repaints nothing.
         let mut wait = 1000u32;
-        pixel_rain(&ctx_at(999), &run, &mut rng, &mut wait, &mut frame);
+        pixel_rain(&ctx_at(999), &run, &mut rng, &mut index, &mut wait, &mut frame);
         assert_eq!(wait, 1000, "still waiting");
 
         // Crossing it arms the next repaint one interval further out.
-        pixel_rain(&ctx_at(1001), &run, &mut rng, &mut wait, &mut frame);
-        assert_eq!(wait, 1001 + pixel_rain_interval(128), "rearmed after a repaint");
+        pixel_rain(&ctx_at(1001), &run, &mut rng, &mut index, &mut wait, &mut frame);
+        assert_eq!(wait, 1001 + pixel_rain_interval(128), "rearmed after a cycle");
+    }
+
+    /// The timer and the index both move on the frame's *last* batch, so the
+    /// cadence does not depend on which batch the current index falls into.
+    #[test]
+    fn pixel_rain_rearms_on_the_last_batch_only() {
+        let leds = Box::leak(Box::new(crate::rgb::led_config::LedConfig::new(
+            [crate::rgb::led_config::LedPoint::new(0, 0); 6],
+            [0xFF; 6],
+            [(0, 0), (0, 1), (0, 2), (0, 3), (1, 0), (1, 1)],
+        )));
+        let config = RgbConfig::with_defaults(true, 100, 200, 128, 0xFF, 255);
+        let mut rng = Rng::with_seed(5);
+        let mut index = 0u8;
+        let mut wait = 0u32;
+        let mut armed_on = Vec::new();
+
+        // Six LEDs at two per batch: three batches, the last one index 2.
+        for iter in 0..3u8 {
+            let before = wait;
+            let ctx = RenderContext {
+                leds,
+                config: &config,
+                center: RenderContext::<6>::DEFAULT_CENTER,
+                time: 5000,
+                process_limit: 2,
+            };
+            let params = EffectParams { iter, flags: 0xFF, init: false };
+            let mut frame = ArrayFrame::<6>::new();
+            pixel_rain(&ctx, &params, &mut rng, &mut index, &mut wait, &mut frame);
+            if wait != before {
+                armed_on.push(iter);
+            }
+        }
+        assert_eq!(armed_on, vec![2], "only the final batch may rearm the timer");
+    }
+
+    /// `JELLYBEAN_RAINDROPS` repaints at most one LED per trigger, and a
+    /// multi-batch frame does not turn one trigger into several repaints.
+    #[test]
+    fn jellybean_raindrops_repaints_once_per_frame() {
+        let leds = Box::leak(Box::new(crate::rgb::led_config::LedConfig::new(
+            [crate::rgb::led_config::LedPoint::new(0, 0); 6],
+            [0xFF; 6],
+            [(0, 0), (0, 1), (0, 2), (0, 3), (1, 0), (1, 1)],
+        )));
+        let config = RgbConfig::with_defaults(true, 100, 200, 128, 0xFF, 255);
+        let mut rng = Rng::with_seed(3);
+        let mut index = u16::MAX;
+        // `time = 0` puts `scale16by8(0, ..) % 5 == 0`, so the trigger fires.
+        let ctx = RenderContext {
+            leds,
+            config: &config,
+            center: RenderContext::<6>::DEFAULT_CENTER,
+            time: 0,
+            process_limit: 2,
+        };
+
+        let mut painted = 0;
+        for iter in 0..3u8 {
+            let params = EffectParams { iter, flags: 0xFF, init: false };
+            let mut frame = ArrayFrame::<6>::new();
+            jellybean_raindrops(&ctx, &params, &mut rng, &mut index, &mut frame);
+            painted += frame.pixels.iter().filter(|p| **p != Rgb::BLACK).count();
+        }
+        assert_eq!(painted, 1, "one trigger repaints one LED, not one per batch");
+        assert_eq!(index, u16::MAX, "the index is parked between triggers");
     }
 
     #[test]
@@ -1778,20 +1856,68 @@ mod tests {
     }
 
     /// The two beacons are distinct effects, not aliases: `DUAL_BEACON` omits the
-    /// `* 2` on the position terms, so at the same position and phase they shift
-    /// the hue by different amounts.
+    /// `* 2` on the position terms.
+    ///
+    /// Small offsets keep the arithmetic checkable by hand: with `dy = 8` and
+    /// `dx = 8`, and the runner's pair `(cos, sin) = (127, 0)`,
+    /// `RAINBOW_BEACON` gives `((8*2*127) + (8*2*0)) / 128 == 15` while
+    /// `DUAL_BEACON` gives `((8*127) + (8*0)) / 128 == 7`.
     #[test]
     fn dual_beacon_is_twice_as_coarse_as_rainbow_beacon() {
         let hsv = Hsv::new(0, 255, 255);
-        let (cos, sin) = (100i8, 100i8);
-        // Both terms are non-zero and `dx == 0`, so the sine term alone decides.
-        let dual = dual_beacon_math(hsv, cos, sin, 224, 32, 112, 32);
-        let rainbow = rainbow_beacon_math(hsv, cos, sin, 224, 32, 112, 32);
+        let (cos_arg, sin_arg, x, y, center) = (127i8, 0i8, 120u8, 40u8, 32u8);
+        let at = (x, y);
+
+        let dual = dual_beacon_math(hsv, cos_arg, sin_arg, at.0, at.1, 112, center);
+        let rainbow = rainbow_beacon_math(hsv, cos_arg, sin_arg, at.0, at.1, 112, center);
         assert_ne!(dual.h, rainbow.h, "the two beacons must not be the same effect");
-        assert_eq!(dual.h, ((112 * 100) / 128) as u8);
-        assert_eq!(rainbow.h, ((112 * 2 * 100) / 128) as i8 as u8);
+        // `dy = 8`, `dx = 8`; the sine is zero, so only the `dy` term survives.
+        assert_eq!(dual.h, ((8 * 127) / 128) as u8);
+        assert_eq!(rainbow.h, ((8 * 2 * 127) / 128) as u8);
         // A centred LED has no offset in either.
-        assert_eq!(dual_beacon_math(hsv, cos, sin, 112, 32, 112, 32).h, 0);
+        assert_eq!(dual_beacon_math(hsv, cos_arg, sin_arg, 112, center, 112, center).h, 0);
+    }
+
+    /// `time = 0` is the case that exposes a swapped `sin`/`cos`: the sine term
+    /// vanishes, so an effect that multiplies the x term by the wrong value
+    /// collapses onto the y axis instead of sweeping.
+    #[test]
+    fn sin_cos_effects_vanish_along_the_axis_the_sine_does_not_reach() {
+        let hsv = Hsv::new(0, 255, 255);
+        // `sin8(0) - 128 == 0`, `cos8(0) - 128 == 127`.
+        let (cos_arg, sin_arg) = (127i8, 0i8);
+
+        // On the centre row, `dy == 0`, so only the sine term can move the hue.
+        // With the sine at zero the whole row is unshifted.
+        assert_eq!(rainbow_beacon_math(hsv, cos_arg, sin_arg, 224, 32, 112, 32).h, 0);
+        // Moving along y brings the cosine term in.
+        assert_ne!(rainbow_beacon_math(hsv, cos_arg, sin_arg, 112, 64, 112, 32).h, 0);
+        // A non-zero sine moves the centre row instead.
+        assert_ne!(rainbow_beacon_math(hsv, 0, 100, 224, 32, 112, 32).h, 0);
+    }
+
+    /// Parity check against the QMK formula, evaluated by hand.
+    ///
+    /// `RAINBOW_BEACON_math` is `(dy*2*cos + dx*2*sin) / 128`. The runner's first
+    /// argument is the cosine, so these are the values QMK produces at
+    /// `time = 32`, where `cos8(32) - 128 == 0` and `sin8(32) - 128 == 127`:
+    /// a LED at `(224, 32)` with centre `(112, 32)` has `dy == 0`, so the result
+    /// is `(112 * 2 * 127) / 128 == 222`.
+    #[test]
+    fn rainbow_beacon_matches_the_qmk_formula_at_a_known_phase() {
+        let hsv = Hsv::new(0, 255, 255);
+        // The runner supplies `(cos_value, sin_value)`, i.e. `(0, 127)` at t=32.
+        let beacon = rainbow_beacon_math(hsv, 0, 127, 224, 32, 112, 32);
+        assert_eq!(beacon.h, ((112 * 2 * 127) / 128) as u8, "dy == 0 leaves the sine term");
+
+        // With `cos == 127` and `sin == 0` the axes trade over: now only the
+        // cosine term lives, and it acts on dy.
+        let on_column = rainbow_beacon_math(hsv, 127, 0, 112, 64, 112, 32);
+        assert_eq!(on_column.h, (((64 - 32) * 2 * 127) / 128) as u8);
+        assert_eq!(rainbow_beacon_math(hsv, 127, 0, 224, 32, 112, 32).h, 0, "dx does not move it");
+
+        // `DIAL_BEACON` drops the `* 2`, so it is exactly half at this phase.
+        assert_eq!(dual_beacon_math(hsv, 0, 127, 224, 32, 112, 32).h, ((112 * 127) / 128) as u8);
     }
 
     /// Every LED the key matrix can address must be reachable by the effect.
