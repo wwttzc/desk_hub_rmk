@@ -153,6 +153,11 @@ storage = [
     "dep:embassy-embedded-hal",
 ]
 
+## **Experimental.** Enable RGB Matrix lighting: a port of QMK's `rgb_matrix`
+## effects together with VialRGB (`lighting: "vialrgb"`) support. The effect
+## engine is chip-independent; the user's crate supplies the smart-LED driver.
+rgb = []
+
 ## Enable defmt support
 defmt = [
     "dep:defmt",

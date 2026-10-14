@@ -118,6 +118,8 @@ pub mod layout_macro;
 pub mod light;
 pub mod matrix;
 pub mod processor;
+#[cfg(feature = "rgb")]
+pub mod rgb;
 #[cfg(feature = "split")]
 pub mod split;
 pub mod state;
